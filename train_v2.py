@@ -240,18 +240,18 @@ for E in range(num_epochs):
             continue
 
         with torch.no_grad():
-            rescaled_image, (h_new, w_new) = random_batch_rescale(
-                orig_image,
-                min_size=6 * 8,
-                max_size=10 * 8,
-                step_multiple=8,
-                ensure_divisible_by=8,
-                keep_square=True,
-                per_sample=False,
-                device=orig_image.device
-            )
+            # rescaled_image, (h_new, w_new) = random_batch_rescale(
+            #     orig_image,
+            #     min_size=6 * 8,
+            #     max_size=10 * 8,
+            #     step_multiple=8,
+            #     ensure_divisible_by=8,
+            #     keep_square=True,
+            #     per_sample=False,
+            #     device=orig_image.device
+            # )
 
-            image = rescaled_image * 2.0 - 1.0
+            image = orig_image * 2.0 - 1.0
             t = torch.rand(b)
             t, _ = torch.sort(t)
             alpha_bar = alpha_bar_cosine(t)
