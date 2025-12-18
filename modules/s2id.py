@@ -203,7 +203,8 @@ class ViT(nn.Module):
             num_heads: int,
             film_dim: int,
             axial_dropout: float = 0.0,
-            ffn_dropout: float = 0.0
+            ffn_dropout: float = 0.0,
+            share_weights: bool = True,
     ):
         super().__init__()
         self.d_channels = d_channels
@@ -213,7 +214,8 @@ class ViT(nn.Module):
         self.axial_attn = AxialAttention(
             d_channels=d_channels,
             num_heads=num_heads,
-            dropout=axial_dropout
+            dropout=axial_dropout,
+            share_weights=share_weights,
         )
         self.axial_scalar = nn.Parameter(torch.ones(d_channels))
 
@@ -277,6 +279,7 @@ class SIID(nn.Module):
             ffn_dropout: float = 0.0,
             text_cond_dim: int = 10,
             text_token_length: int = 1,
+            share_weights: bool = True,
     ):
         super().__init__()
         self.d_channels = int(d_channels)

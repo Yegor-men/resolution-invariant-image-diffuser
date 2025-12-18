@@ -56,18 +56,19 @@ model = SIID(
     c_channels=1,
     d_channels=256,
     rescale_factor=8,
-    enc_blocks=6,
-    dec_blocks=6,
+    enc_blocks=8,
+    dec_blocks=8,
     num_heads=4,
     pos_freq=2,
-    size_freq=3,
+    size_freq=2,
     time_freq=7,
     film_dim=256,
-    cross_dropout=0.05,
-    axial_dropout=0.05,
-    ffn_dropout=0.1,
+    cross_dropout=0.1,
+    axial_dropout=0.1,
+    ffn_dropout=0.2,
     text_cond_dim=10,
     text_token_length=1,
+    share_weights=False,
 ).to(device)
 
 # from save_load_model import load_checkpoint_into
@@ -127,7 +128,7 @@ train_dloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 test_dloader = DataLoader(test_dataset, batch_size=batch_size, shuffle=True)
 
 peak_lr = 1e-3
-final_lr = 1e-5
+final_lr = 1e-4
 total_steps = num_epochs * len(train_dloader)
 warmup_steps = len(train_dloader)
 
@@ -135,6 +136,89 @@ optimizer = torch.optim.AdamW(params=model.parameters(), lr=peak_lr)
 scheduler = make_cosine_with_warmup(optimizer, warmup_steps, total_steps, final_lr)
 
 # ======================================================================================================================
+import random
+import math
+from typing import Tuple
+
+
+def _lcm(a: int, b: int) -> int:
+    return abs(a * b) // math.gcd(a, b)
+
+
+def _clamped_multiple(value: int, multiple: int, min_v: int, max_v: int) -> int:
+    """Round value to nearest multiple and clamp into [min_v, max_v]."""
+    k = max(1, round(value / multiple))
+    out = k * multiple
+    out = max(min_v, min(out, max_v))
+    return out
+
+
+def random_batch_rescale(
+        batch: torch.Tensor,
+        min_size: int = 48,
+        max_size: int = 80,
+        step_multiple: int = 8,
+        ensure_divisible_by: int = 8,
+        keep_square: bool = True,
+        per_sample: bool = False,
+        device: torch.device | None = None,
+) -> Tuple[torch.Tensor, Tuple[int, int]]:
+    """
+    Rescale a batch of images (B,C,H,W) using bicubic interpolation to a random size.
+
+    - If per_sample=False (default) the whole batch will be resized to a single random size (recommended).
+    - Ensures the resulting height/width are multiples of `step_multiple` AND divisible by `ensure_divisible_by`.
+      Internally computes a step = lcm(step_multiple, ensure_divisible_by).
+    - Returns (resized_batch, (new_h, new_w)). If per_sample=True returns resized batch and (None, None).
+
+    NOTE: PixelUnshuffle requires H,W to be divisible by your reduction/rescale factor (e.g. 8).
+    """
+    assert batch.ndim == 4, "batch must be [B,C,H,W]"
+    device = device or batch.device
+    B, C, H, W = batch.shape
+    # ensure step is compatible with required divisibility
+    step = _lcm(step_multiple, ensure_divisible_by)
+
+    # clamp min/max to sensible multiples
+    min_size = max(min_size, step)
+    max_size = max(max_size, min_size)
+    # compute available multipliers
+    min_k = (min_size + step - 1) // step
+    max_k = max_size // step
+    if max_k < min_k:
+        raise ValueError("Invalid min/max vs step/divisibility — adjust parameters.")
+
+    if per_sample:
+        out_images = []
+        for i in range(B):
+            k = random.randint(min_k, max_k)
+            tgt = k * step
+            if keep_square:
+                new_h = new_w = tgt
+            else:
+                k_h = random.randint(min_k, max_k)
+                k_w = random.randint(min_k, max_k)
+                new_h, new_w = k_h * step, k_w * step
+            img = batch[i: i + 1]  # [1,C,H,W]
+            resized = torch.nn.functional.interpolate(img.to(device), size=(new_h, new_w), mode='bicubic',
+                                                      align_corners=False)
+            out_images.append(resized)
+        return torch.cat(out_images, dim=0), (None, None)
+    else:
+        k = random.randint(min_k, max_k)
+        tgt = k * step
+        if keep_square:
+            new_h = new_w = tgt
+        else:
+            # pick separate multiples for height/width
+            k_h = random.randint(min_k, max_k)
+            k_w = random.randint(min_k, max_k)
+            new_h, new_w = k_h * step, k_w * step
+
+        resized = torch.nn.functional.interpolate(batch.to(device), size=(new_h, new_w), mode='bicubic',
+                                                  align_corners=False)
+        return resized, (new_h, new_w)
+
 
 from tqdm import tqdm
 from modules.alpha_bar import alpha_bar_cosine
@@ -157,7 +241,18 @@ for E in range(num_epochs):
             continue
 
         with torch.no_grad():
-            image = orig_image * 2.0 - 1.0
+            rescaled_image, (h_new, w_new) = random_batch_rescale(
+                orig_image,
+                min_size=48,
+                max_size=80,
+                step_multiple=8,
+                ensure_divisible_by=8,
+                keep_square=True,
+                per_sample=False,
+                device=orig_image.device
+            )
+
+            image = rescaled_image * 2.0 - 1.0
             t = torch.rand(b)
             t, _ = torch.sort(t)
             alpha_bar = alpha_bar_cosine(t)
@@ -172,7 +267,7 @@ for E in range(num_epochs):
         eps_null, eps_pos, eps_neg = model(noisy_image, alpha_bar, pos_cond)
         loss = nn.functional.mse_loss(eps_null, eps) + nn.functional.mse_loss(eps_pos, eps)
         train_loss += loss.item()
-        loss.backward()
+        (loss * batch_size).backward()
         optimizer.step()
         scheduler.step()
         optimizer.zero_grad()
