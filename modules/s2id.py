@@ -63,10 +63,12 @@ class AbsSizeEmbed(nn.Module):
         frequencies = torch.pi / (2.0 ** powers)  # [pi, (1/2)pi, (1/4)pi, ...]
         self.register_buffer("frequencies", frequencies, persistent=True)
 
-        self.proj = nn.Sequential(
-            nn.LayerNorm(2 * num_frequencies),
-            nn.Linear(2 * num_frequencies, film_dim),
-        )
+        self.norm = nn.LayerNorm(2 * num_frequencies)
+
+        # self.proj = nn.Sequential(
+        #     nn.LayerNorm(2 * num_frequencies),
+        #     nn.Linear(2 * num_frequencies, film_dim),
+        # )
 
     def forward(self, size):
         tproj = self.frequencies * size
@@ -74,7 +76,7 @@ class AbsSizeEmbed(nn.Module):
         cos_feat = torch.cos(tproj)
         feat = torch.cat([sin_feat, cos_feat], dim=-1)
 
-        size_vector = self.proj(feat)
+        size_vector = self.norm(feat)
 
         return size_vector
 
@@ -88,10 +90,12 @@ class ContTimeEmbed(nn.Module):
         frequencies = torch.pi * (2.0 ** powers)  # [pi, 2pi, 4pi, ...]
         self.register_buffer("frequencies", frequencies, persistent=True)
 
-        self.proj = nn.Sequential(
-            nn.LayerNorm(2 * num_frequencies),
-            nn.Linear(2 * num_frequencies, film_dim),
-        )
+        self.norm = nn.LayerNorm(2 * num_frequencies)
+
+        # self.proj = nn.Sequential(
+        #     nn.LayerNorm(2 * num_frequencies),
+        #     nn.Linear(2 * num_frequencies, film_dim),
+        # )
 
     def forward(self, alpha_bar: torch.Tensor) -> torch.Tensor:
         alpha_mapped = alpha_bar * (1 - 2 * self.eps) - (0.5 - self.eps)
@@ -102,7 +106,7 @@ class ContTimeEmbed(nn.Module):
         cos_feat = torch.cos(tproj)
         feat = torch.cat([sin_feat, cos_feat], dim=-1)
 
-        time_vector = self.proj(feat)
+        time_vector = self.norm(feat)
 
         return time_vector
 
@@ -112,8 +116,7 @@ class FiLM(nn.Module):
         super().__init__()
 
         self.film = nn.Sequential(
-            nn.Linear(film_dim, film_dim),
-            nn.SiLU(),
+            nn.Dropout(0.05),
             nn.Linear(film_dim, 2 * out_dim),
         )
 
@@ -273,7 +276,7 @@ class SIID(nn.Module):
             pos_freq: int,  # number of frequencies for relative positioning, frequencies increasing
             size_freq: int,  # number of frequencies for absolute size, frequencies decreasing
             time_freq: int,  # number of frequencies for time, frequencies increasing (assume that 1k steps is the most)
-            film_dim: int = None,  # dimension that the base film vector sits in, then gets turned to d channels
+            film_dim: int,  # dimension that the base film vector sits in, then gets turned to d channels
             cross_dropout: float = 0.0,
             axial_dropout: float = 0.0,
             ffn_dropout: float = 0.0,
@@ -287,7 +290,12 @@ class SIID(nn.Module):
         self.reduction_size = rescale_factor
         latent_img_channels = c_channels * rescale_factor ** 2
 
-        film_dim = 2 * d_channels if film_dim is None else film_dim
+        self.film_proj = nn.Sequential(
+            nn.Linear(time_freq * 2 + size_freq * 4, film_dim),
+            nn.SiLU(),
+            nn.Linear(film_dim, film_dim),
+            nn.SiLU()
+        )
 
         self.image_to_latent = nn.Sequential(
             nn.PixelUnshuffle(rescale_factor),
@@ -298,6 +306,8 @@ class SIID(nn.Module):
             nn.Conv2d(d_channels, latent_img_channels, 1),
             nn.PixelShuffle(rescale_factor)
         )
+        nn.init.zeros_(self.latent_to_epsilon[-2].weight)
+        nn.init.zeros_(self.latent_to_epsilon[-2].bias)
 
         self.positional_embedding = RelPosEmbed2D(pos_freq, d_channels)  # added directly to latent
         self.time_embed = ContTimeEmbed(time_freq, film_dim)  # creates film vector
@@ -313,7 +323,8 @@ class SIID(nn.Module):
                 num_heads=num_heads,
                 film_dim=film_dim,
                 axial_dropout=axial_dropout,
-                ffn_dropout=ffn_dropout
+                ffn_dropout=ffn_dropout,
+                share_weights=share_weights
             ) for _ in range(enc_blocks)
         ])
 
@@ -331,7 +342,8 @@ class SIID(nn.Module):
                 num_heads=num_heads,
                 film_dim=film_dim,
                 axial_dropout=axial_dropout,
-                ffn_dropout=ffn_dropout
+                ffn_dropout=ffn_dropout,
+                share_weights=share_weights
             ) for _ in range(dec_blocks)
         ])
 
@@ -352,10 +364,11 @@ class SIID(nn.Module):
         rel_pos_map = self.positional_embedding(latent_h, latent_w)  # [B, D, H/red, W/red]
         latent = latent + rel_pos_map
 
-        time_vector = self.time_embed(alpha_bar)
-        height_vector = self.size_embed(latent_h)
-        width_vector = self.size_embed(latent_w)
-        film_vector = time_vector + height_vector + width_vector
+        time_vector = self.time_embed(alpha_bar)  # [B, time_dim]
+        height_vector = self.size_embed(latent_h).expand(b, -1)  # [b, size_dim]
+        width_vector = self.size_embed(latent_w).expand(b, -1)  # [b, size_dim]
+        film_vector = torch.cat([time_vector, height_vector, width_vector], dim=-1)
+        film_vector = self.film_proj(film_vector)
 
         for i, enc_block in enumerate(self.enc_blocks):
             latent = enc_block(latent, film_vector)
