@@ -70,11 +70,11 @@ model = SIID(
     share_weights=False,
 ).to(device)
 
-# from save_load_model import load_checkpoint_into
-#
-# model = load_checkpoint_into(model, "models/baseline_0.02342.pt", "cuda")
-# model.to(device)
-# model.eval()
+from save_load_model import load_checkpoint_into
+
+model = load_checkpoint_into(model, "models/baselineE30_0.02192_20251219_150002.pt", "cuda")
+model.to(device)
+model.eval()
 import copy
 
 ema_model = copy.deepcopy(model)
@@ -119,15 +119,15 @@ def make_cosine_with_warmup(optimizer, warmup_steps, total_steps, lr_end):
     return LambdaLR(optimizer, lr_lambda, -1)
 
 
-num_epochs = 20
+num_epochs = 30
 batch_size = 50
 ema_decay = 0.999
 
 train_dloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 test_dloader = DataLoader(test_dataset, batch_size=batch_size, shuffle=True)
 
-peak_lr = 1e-3
-final_lr = 1e-5
+peak_lr = 1e-4
+final_lr = 1e-6
 total_steps = num_epochs * len(train_dloader)
 warmup_steps = len(train_dloader)
 
