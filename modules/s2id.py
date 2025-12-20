@@ -99,7 +99,6 @@ class FiLM(nn.Module):
         super().__init__()
 
         self.film = nn.Sequential(
-            nn.Dropout(0.05),
             nn.Linear(film_dim, 2 * out_dim),
         )
 

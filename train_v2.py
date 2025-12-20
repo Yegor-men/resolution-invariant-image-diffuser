@@ -54,16 +54,16 @@ from modules.count_params import count_parameters
 
 model = SIID(
     c_channels=1,
-    d_channels=320,
+    d_channels=256,
     rescale_factor=8,
-    enc_blocks=6,
-    dec_blocks=6,
-    num_heads=5,
+    enc_blocks=8,
+    dec_blocks=8,
+    num_heads=8,
     pos_high_freq=2,
     pos_low_freq=3,
     time_high_freq=7,
     time_low_freq=3,
-    film_dim=320,
+    film_dim=256,
     axial_dropout=0.1,
     cross_dropout=0.1,
     ffn_dropout=0.2,
@@ -121,15 +121,15 @@ def make_cosine_with_warmup(optimizer, warmup_steps, total_steps, lr_end):
     return LambdaLR(optimizer, lr_lambda, -1)
 
 
-num_epochs = 30
+num_epochs = 60
 batch_size = 50
-ema_decay = 0.999
+ema_decay = 0.9995
 
 train_dloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 test_dloader = DataLoader(test_dataset, batch_size=batch_size, shuffle=True)
 
-peak_lr = 1e-4
-final_lr = 1e-6
+peak_lr = 1e-3
+final_lr = 1e-5
 total_steps = num_epochs * len(train_dloader)
 warmup_steps = len(train_dloader)
 
@@ -231,6 +231,7 @@ train_losses = []
 test_losses = []
 percentile_losses = []
 
+start = time.time()
 for E in range(num_epochs):
 
     # TRAINING
@@ -428,3 +429,8 @@ for E in range(num_epochs):
         model_path = save_checkpoint(ema_model, prefix=f"E{E + 1}_{test_loss:.5f}")
         time.sleep(0.2)
 # ======================================================================================================================
+end = time.time()
+total_time = end - start
+import datetime
+
+print(f"Finished training, total time: {datetime.timedelta(seconds=total_time)}")
