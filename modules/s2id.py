@@ -189,6 +189,7 @@ class EncBlock(nn.Module):
     ):
         super().__init__()
         self.d_channels = d_channels
+        self.sigma = nn.Parameter(torch.logit(torch.tensor(0.1667)))
 
         self.axial_norm = nn.GroupNorm(num_heads, d_channels)
         self.axial_film = FiLM(film_dim, d_channels)
@@ -215,7 +216,8 @@ class EncBlock(nn.Module):
     def forward(self, image, film_vector, x_lin, y_lin):
         x_lin, y_lin = x_lin.to(image.device), y_lin.to(image.device)
 
-        sigma = 0.1667  # 0.5/3 so that +-3sigma = -0.5 to 0.5
+        # sigma = 0.1667  # 0.5/3 so that +-3sigma = -0.5 to 0.5
+        sigma = torch.sigmoid(self.sigma)
 
         dx = x_lin.unsqueeze(0) - x_lin.unsqueeze(1)  # [W, W]
         d2x = dx * dx
@@ -347,6 +349,9 @@ class SIID(nn.Module):
         self.d_channels = int(d_channels)
         total_pos_freq = pos_low_freq + pos_high_freq
         total_time_freq = time_low_freq + time_high_freq
+
+        print(f"Total channels for positioning: {total_pos_freq * 4 * 2}")
+        print(f"Total channels for color: {c_channels * rescale_factor ** 2}")
 
         self.reduction_size = rescale_factor
         latent_img_channels = c_channels * rescale_factor ** 2

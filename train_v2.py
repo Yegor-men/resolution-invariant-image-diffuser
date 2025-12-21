@@ -321,6 +321,9 @@ for E in range(num_epochs):
     print(f"Epoch {E} - TRAIN: {train_loss:.5f}, TEST: {test_loss:.5f}")
     time.sleep(0.2)
 
+    sigmas = [torch.sigmoid(block.sigma) for block in ema_model.enc_blocks]
+    print(sigmas)
+
     plt.plot(train_losses, label="Train")
     plt.plot(test_losses, label="Test")
     plt.legend()
