@@ -325,18 +325,21 @@ class SIID(nn.Module):
             share_weights: bool = False,
     ):
         super().__init__()
+        self.c_channels = int(c_channels)
         self.d_channels = int(d_channels)
-        num_pos_frequencies = pos_low_freq + pos_high_freq
-        num_time_frequencies = time_low_freq + time_high_freq
-
-        print(f"Total channels for positioning: {num_pos_frequencies * 4 * 2}")
-        print(f"Total channels for color: {c_channels * rescale_factor ** 2}")
+        self.rescale_factor = int(rescale_factor)
+        self.num_enc_blocks = int(enc_blocks)
+        self.num_dec_blocks = int(dec_blocks)
+        self.num_heads = int(num_heads)
+        self.num_pos_frequencies = int(pos_low_freq + pos_high_freq)
+        self.num_time_frequencies = int(time_low_freq + time_high_freq)
+        self.film_dim = int(film_dim)
 
         self.reduction_size = rescale_factor
         latent_img_channels = c_channels * rescale_factor ** 2
 
         self.pixel_unshuffle = nn.PixelUnshuffle(rescale_factor)
-        self.proj_to_latent = nn.Conv2d(num_pos_frequencies * 4 * 2 + latent_img_channels, d_channels, 1)
+        self.proj_to_latent = nn.Conv2d(self.num_pos_frequencies * 4 * 2 + latent_img_channels, d_channels, 1)
 
         self.latent_to_epsilon = nn.Sequential(
             nn.Conv2d(d_channels, latent_img_channels, 1),
@@ -348,7 +351,7 @@ class SIID(nn.Module):
         self.pos_embed = PosEmbed2d(pos_high_freq, pos_low_freq)
         self.time_embed = ContTimeEmbed(time_high_freq, time_low_freq)
         self.film_proj = nn.Sequential(
-            nn.Linear(num_time_frequencies * 2, film_dim),
+            nn.Linear(self.num_time_frequencies * 2, film_dim),
             nn.SiLU(),
             nn.Linear(film_dim, film_dim),
             nn.SiLU()
@@ -376,6 +379,16 @@ class SIID(nn.Module):
                 share_weights=share_weights
             ) for _ in range(dec_blocks)
         ])
+
+    def print_model_summary(self):
+        total = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        print(f"Trainable parameters: {total:,}")
+
+        total_pos_channels = self.num_pos_frequencies * 2 * 2 * 2  # x/y, sin/cos, rel/abs
+        total_col_channels = self.c_channels * self.rescale_factor ** 2
+        total_channels = total_pos_channels + total_col_channels
+
+        print(f"Channels for color/positioning: {total_col_channels}/{total_pos_channels}, total: {total_channels}")
 
     def forward(self, image: torch.Tensor, alpha_bar: torch.Tensor, text_conds: list[torch.Tensor]):
         assert image.size(-1) % self.reduction_size == 0, f"Image width must be divisible by {self.reduction_size}"
