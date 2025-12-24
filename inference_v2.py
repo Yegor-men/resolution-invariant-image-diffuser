@@ -49,49 +49,36 @@ with torch.no_grad():
     for i in range(10):
         positive_label[i * 10:(i + 1) * 10, i] = 1.0
 
-    multi_pos_text_cond = text_encoder(positive_label)
-    multi_null_text_cond = text_encoder(torch.zeros_like(positive_label))
+    pos_text_cond = text_encoder(positive_label)
+    null_text_cond = text_encoder(torch.zeros_like(positive_label))
 
-    h, w = 128, 128
-    multi_noise = torch.randn(100, 1, model.rescale_factor * h, model.rescale_factor * w).to(device)
+    rf = model.rescale_factor
+    sizes = [
+        (8, 8, "1:1"),
+        (6, 9, "3:2"),
+        (9, 6, "2:3"),
+        (8, 6, "3:4"),
+        (6, 8, "4:3"),
+        (8, 10, "4:5"),
+        (10, 8, "5:4"),
+        (16, 16, "Double Resolution"),
+        (32, 32, "Quadruple Resolution"),
+    ]
 
-    foo = torch.zeros(1, 10).to(device)
-    foo[0][0] = 1.0
-    single_pos_text_cond = text_encoder(foo)
-    single_null_text_cond = text_encoder(torch.zeros_like(foo))
-    single_noise = torch.randn(1, 1, model.rescale_factor * h, model.rescale_factor * w).to(device)
+    for (height, width, name) in sizes:
+        grid_noise = torch.randn(100, 1, rf * height, rf * width).to(device)
 
-    thing = "single"
-
-    start1 = time.time()
-    if thing == "multi":
         final_x0_hat, final_x = run_ddim_visualization(
             model=model,
-            initial_noise=multi_noise,
-            pos_text_cond=multi_pos_text_cond,
-            null_text_cond=multi_null_text_cond,
+            initial_noise=grid_noise,
+            pos_text_cond=pos_text_cond,
+            null_text_cond=null_text_cond,
             alpha_bar_fn=alpha_bar_cosine,
             render_image_fn=render_image,
             num_steps=100,
-            cfg_scale=5.0,
+            cfg_scale=4.0,
             eta=2.0,
-            render_every=1,
-            device=torch.device("cuda")
+            render_every=1000,
+            device=torch.device("cuda"),
+            title=f"{name} - H:{rf * height}, W:{rf * width}"
         )
-    elif thing == "single":
-        final_x0_hat, final_x = run_ddim_visualization(
-            model=model,
-            initial_noise=single_noise,
-            pos_text_cond=single_pos_text_cond,
-            null_text_cond=single_null_text_cond,
-            alpha_bar_fn=alpha_bar_cosine,
-            render_image_fn=render_image,
-            num_steps=100,
-            cfg_scale=5.0,
-            eta=2.0,
-            render_every=1,
-            device=torch.device("cuda")
-        )
-    end = time.time()
-
-    print(f"Time taken: {end - start1:.3f}s")

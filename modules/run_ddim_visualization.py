@@ -1,5 +1,6 @@
 import torch
 from typing import Optional
+from tqdm import tqdm
 
 
 @torch.no_grad()
@@ -15,6 +16,7 @@ def run_ddim_visualization(
         eta: float = 0.0,
         render_every: int = 1,
         device: Optional[torch.device] = None,
+        title: str = None,
 ):
     device = device or initial_noise.device
     model = model.to(device)
@@ -33,7 +35,7 @@ def run_ddim_visualization(
     # if render_image_fn is not None:
     # 	render_image_fn(torch.clamp((x + 1.0) / 2.0, 0.0, 1.0))
 
-    for i in range(num_steps):
+    for i in tqdm(range(num_steps), total=num_steps, desc=f"{title if title is not None else "diffusing"}"):
         t_val = float(ts[i].item())
         s_val = float(ts[i + 1].item())
 
@@ -59,7 +61,7 @@ def run_ddim_visualization(
 
         # render reconstruction
         if ((i + 1) % render_every == 0) and (render_image_fn is not None):
-            render_image_fn(torch.clamp((x0_hat + 1.0) / 2.0, 0.0, 1.0))
+            render_image_fn(torch.clamp((x0_hat + 1.0) / 2.0, 0.0, 1.0), title=title)
 
         # direction and ancestral sigma
         eps_dir = (x - sqrt_a_t * x0_hat) / (sqrt_1_a_t + eps_small)
@@ -83,6 +85,6 @@ def run_ddim_visualization(
     final_x0_hat = (x - torch.sqrt((1.0 - final_a).clamp(min=0.0)) * eps_hat) / (torch.sqrt(final_a) + eps_small)
 
     if render_image_fn is not None:
-        render_image_fn(torch.clamp((final_x0_hat + 1.0) / 2.0, 0.0, 1.0))
+        render_image_fn(torch.clamp((final_x0_hat + 1.0) / 2.0, 0.0, 1.0), title=title)
 
     return final_x0_hat, x
