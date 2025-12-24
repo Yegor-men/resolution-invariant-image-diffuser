@@ -58,17 +58,17 @@ with torch.no_grad():
     rf = model.rescale_factor
     sizes = [
         # (128, 128, "SDXL 1MP")  # need to change the positive label code above to fit batch size 10 for memory
-        # (8, 8, "1:1"),
-        # (6, 9, "3:2"),
-        # (9, 6, "2:3"),
-        # (8, 6, "3:4"),
-        # (6, 8, "4:3"),
-        # (8, 10, "5:4"),
-        # (10, 8, "4:5"),
+        (8, 8, "1:1"),
+        (6, 9, "3:2"),
+        (9, 6, "2:3"),
+        (8, 6, "3:4"),
+        (6, 8, "4:3"),
+        (8, 10, "5:4"),
+        (10, 8, "4:5"),
         (9, 16, "16:9"),
         (16, 9, "9:16"),
-        # (16, 16, "Double Resolution"),
-        # (32, 32, "Quadruple Resolution"),
+        (16, 16, "Double Resolution"),
+        (32, 32, "Quadruple Resolution"),
     ]
 
     for (height, width, name) in sizes:
