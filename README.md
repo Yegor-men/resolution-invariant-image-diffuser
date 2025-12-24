@@ -8,5 +8,9 @@ epsilon noise to be used as a diffusion model. Size and aspect ratio invariant, 
 augmentations.
 
 To train, run `train_v2.py`
+
 To render the images, run `inference_v2.py`
+
+To t scrape on an existing model, run `t_scraping.py`
+
 To read the architecture code, look at `modules/s2id.py`
