@@ -437,8 +437,10 @@ for E in range(num_epochs):
 
     # MODEL SAVING
     if (E + 1) % 1 == 0 or E == num_epochs:
-        model_path = save_checkpoint(ema_model, prefix=f"E{E + 1}_{test_loss:.5f}")
+        model_path = save_checkpoint(ema_model, prefix=f"E{E + 1}_{test_loss:.5f}_diffusion")
+        text_encoder_path = save_checkpoint(text_encoder, prefix=f"E{E + 1}_{test_loss:.5f}_text_embedding")
         time.sleep(0.2)
+
 # ======================================================================================================================
 end = time.time()
 total_time = end - start
