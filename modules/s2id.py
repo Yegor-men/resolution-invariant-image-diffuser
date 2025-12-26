@@ -32,27 +32,39 @@ class PosEmbed2d(nn.Module):
 
         yy, xx = torch.meshgrid(y_coordinates, x_coordinates, indexing="ij")
         grid = torch.stack([xx, yy], dim=0)
-        return grid, x_coordinates, y_coordinates
+        return grid
 
-    def forward(self, h: int, w: int, relative: bool):
-        grid, x_lin, y_lin = self._make_grid(h, w, relative)
-        grid = grid.to(self.frequencies)
+    def forward(self, batch_size: int, h: int, w: int, relative: bool):
+        base_grid = self._make_grid(h, w, relative)
+        base_grid = base_grid.to(self.frequencies.device)  # [2, h, w]
 
-        grid_unsqueezed = grid.unsqueeze(-1)  # [2, h, w, 1]
-        frequencies = self.frequencies.view(1, 1, 1, -1)  # [1, 1, 1, F]
-        tproj = grid_unsqueezed * frequencies  # [2, h, w, F]
+        # Expand base_grid to batch size
+        grid = base_grid.unsqueeze(0).expand(batch_size, -1, -1, -1)  # [b, 2, h, w]
 
-        sin_feat = torch.sin(tproj)
-        cos_feat = torch.cos(tproj)
+        if self.training:
+            # Add jitter: for x (dim=0), uniform [-1/w, 1/w]
+            # for y (dim=1), uniform [-1/h, 1/h]
+            jitter_x = torch.empty(batch_size, 1, h, w, device=grid.device).uniform_(-1.0 / w, 1.0 / w)
+            jitter_y = torch.empty(batch_size, 1, h, w, device=grid.device).uniform_(-1.0 / h, 1.0 / h)
+            jitter = torch.cat([jitter_x, jitter_y], dim=1)  # [b, 2, h, w]
+            grid = grid + jitter
 
-        # now rearrange into channel-first format expected by conv: [1, 4F, h, w]
-        # sin_feat shape [2, h, w, F] -> permute -> [2, F, h, w] -> reshape [2F, h, w]
-        sin_ch = sin_feat.permute(0, 3, 1, 2).contiguous().view(2 * self.num_frequencies, h, w)
-        cos_ch = cos_feat.permute(0, 3, 1, 2).contiguous().view(2 * self.num_frequencies, h, w)
-        fourier_ch = torch.cat([sin_ch, cos_ch], dim=0).unsqueeze(0)  # [1, 4F, h, w]
-        positional_embedding = self.norm(fourier_ch).squeeze(0)  # [4F, h, w]
+        # Now compute the Fourier features
+        grid_unsqueezed = grid.unsqueeze(-1)  # [b, 2, h, w, 1]
+        frequencies = self.frequencies.view(1, 1, 1, 1, -1)  # [1, 1, 1, 1, F]
+        tproj = grid_unsqueezed * frequencies  # [b, 2, h, w, F]
 
-        return positional_embedding, x_lin, y_lin
+        sin_feat = torch.sin(tproj)  # [b, 2, h, w, F]
+        cos_feat = torch.cos(tproj)  # [b, 2, h, w, F]
+
+        # Rearrange into [b, 4F, h, w]
+        sin_ch = sin_feat.permute(0, 1, 4, 2, 3).contiguous().view(batch_size, 2 * self.num_frequencies, h, w)
+        cos_ch = cos_feat.permute(0, 1, 4, 2, 3).contiguous().view(batch_size, 2 * self.num_frequencies, h, w)
+        fourier_ch = torch.cat([sin_ch, cos_ch], dim=1)  # [b, 4F, h, w]
+
+        positional_embedding = self.norm(fourier_ch)  # [b, 4F, h, w]
+
+        return positional_embedding
 
 
 class ContTimeEmbed(nn.Module):
@@ -148,17 +160,17 @@ class AxialAttention(nn.Module):
                 dropout=dropout,
             )
 
-    def forward(self, image, attn_mask_row=None, attn_mask_col=None):
+    def forward(self, image):
         b, d, h, w = image.shape
 
         # attn_mask is there for EncBlock to use to do the gaussian masking
 
         x_row = image.permute(0, 2, 3, 1).contiguous().view(b * h, w, d)
-        attn_row_out, _ = self.row_mha(x_row, x_row, x_row, need_weights=False, attn_mask=attn_mask_row)
+        attn_row_out, _ = self.row_mha(x_row, x_row, x_row, need_weights=False)
         attn_row_out = attn_row_out.view(b, h, w, d).permute(0, 3, 1, 2).contiguous()
 
         x_col = image.permute(0, 3, 2, 1).contiguous().view(b * w, h, d)
-        attn_col_out, _ = self.col_mha(x_col, x_col, x_col, need_weights=False, attn_mask=attn_mask_col)
+        attn_col_out, _ = self.col_mha(x_col, x_col, x_col, need_weights=False)
         attn_col_out = attn_col_out.view(b, w, h, d).permute(0, 3, 2, 1).contiguous()
 
         return attn_row_out + attn_col_out
@@ -172,12 +184,10 @@ class EncBlock(nn.Module):
             film_dim: int,
             axial_dropout: float = 0.0,
             ffn_dropout: float = 0.0,
-            sigma: float = 0.1667,  # 0.1667=0.5/3 so that +-3sigma = -0.5 to 0.5
             share_weights: bool = True,
     ):
         super().__init__()
         self.d_channels = d_channels
-        self.sigma = nn.Parameter(torch.logit(torch.tensor(sigma)))
 
         self.axial_norm = nn.GroupNorm(num_heads, d_channels)
         self.axial_film = FiLM(film_dim, d_channels)
@@ -201,19 +211,13 @@ class EncBlock(nn.Module):
 
         self.final_scalar = nn.Parameter(torch.ones(d_channels) * 0.1)
 
-    def forward(self, image, film_vector, d2x, d2y):
-        sigma = torch.sigmoid(self.sigma)
-
-        attn_mask_row = -0.5 * (d2x / (sigma * sigma))  # [W, W]
-        attn_mask_col = -0.5 * (d2y / (sigma * sigma))  # [H, H]
-        # LOGIC FOR GAUSSIAN MASK CREATION ^^^
-
+    def forward(self, image, film_vector):
         working_image = image
 
         axial_norm = self.axial_norm(working_image)
         axial_g, axial_b = self.axial_film(film_vector)
         axial_filmed = axial_norm * axial_g.unsqueeze(-1).unsqueeze(-1) + axial_b.unsqueeze(-1).unsqueeze(-1)
-        axial_out = self.axial_attn(axial_filmed, attn_mask_row, attn_mask_col)
+        axial_out = self.axial_attn(axial_filmed)
 
         working_image = working_image + axial_out * self.axial_scalar.view(1, self.d_channels, 1, 1)
 
@@ -398,23 +402,16 @@ class SIID(nn.Module):
 
         shuffled_image = self.pixel_unshuffle(image)
         latent_h, latent_w = shuffled_image.size(-2), shuffled_image.size(-1)
-        rel_pos_map, x_lin, y_lin = self.pos_embed(latent_h, latent_w, True)
-        rel_pos_map = rel_pos_map.expand(b, -1, -1, -1)  # [b, 4F, H, W]
-        abs_pos_map, _, _ = self.pos_embed(latent_h, latent_w, False)
-        abs_pos_map = abs_pos_map.expand(b, -1, -1, -1)  # [1, 4F, H, W]
+        rel_pos_map = self.pos_embed(b, latent_h, latent_w, True).expand(b, -1, -1, -1)  # [b, 4F, H, W]
+        abs_pos_map = self.pos_embed(b, latent_h, latent_w, False).expand(b, -1, -1, -1)  # [b, 4F, H, W]
         stacked_latent = torch.cat([shuffled_image, rel_pos_map, abs_pos_map], dim=-3)
         latent = self.proj_to_latent(stacked_latent)
 
         time_vector = self.time_embed(alpha_bar)  # [B, time_dim]
         film_vector = self.film_proj(time_vector)
 
-        x_lin, y_lin = x_lin.to(image.device), y_lin.to(image.device)
-        dx = x_lin.unsqueeze(0) - x_lin.unsqueeze(1)  # [W, W]
-        dy = y_lin.unsqueeze(0) - y_lin.unsqueeze(1)  # [H, H]
-        d2x, d2y = dx * dx, dy * dy
-
         for i, enc_block in enumerate(self.enc_blocks):
-            latent = enc_block(latent, film_vector, d2x, d2y)
+            latent = enc_block(latent, film_vector)
 
         # text_conds is a list of tensors, each tensor is the token conditioning
         epsilon_list = []
