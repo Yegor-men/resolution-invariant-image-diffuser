@@ -42,10 +42,16 @@ class PosEmbed2d(nn.Module):
         grid = base_grid.unsqueeze(0).expand(batch_size, -1, -1, -1)  # [b, 2, h, w]
 
         if self.training:
-            # Add jitter: for x (dim=0), uniform [-1/w, 1/w]
-            # for y (dim=1), uniform [-1/h, 1/h]
-            jitter_x = torch.empty(batch_size, 1, h, w, device=grid.device).uniform_(-1.0 / w, 1.0 / w)
-            jitter_y = torch.empty(batch_size, 1, h, w, device=grid.device).uniform_(-1.0 / h, 1.0 / h)
+            if relative:
+                max_dim = max(h, w)
+                sigma = 1.0 / (2 * max_dim)
+                jitter_x = torch.normal(mean=0.0, std=sigma, size=(batch_size, 1, h, w), device=grid.device)
+                jitter_y = torch.normal(mean=0.0, std=sigma, size=(batch_size, 1, h, w), device=grid.device)
+            else:
+                sigma_x = 1.0 / (2 * w)
+                sigma_y = 1.0 / (2 * h)
+                jitter_x = torch.normal(mean=0.0, std=sigma_x, size=(batch_size, 1, h, w), device=grid.device)
+                jitter_y = torch.normal(mean=0.0, std=sigma_y, size=(batch_size, 1, h, w), device=grid.device)
             jitter = torch.cat([jitter_x, jitter_y], dim=1)  # [b, 2, h, w]
             grid = grid + jitter
 
