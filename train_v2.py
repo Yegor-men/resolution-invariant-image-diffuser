@@ -389,51 +389,36 @@ for E in range(num_epochs):
         pos_text_cond = text_encoder(positive_label)
         null_text_cond = text_encoder(torch.zeros_like(positive_label))
 
-        small_noise = torch.randn(100, 1, 48, 48).to(device)
-        medium_noise = torch.randn(100, 1, 64, 64).to(device)
-        big_noise = torch.randn(100, 1, 80, 80).to(device)
+        rf = model.rescale_factor
+        sizes = [
+            (8, 8, "1:1"),
+            (6, 9, "3:2"),
+            (9, 6, "2:3"),
+            (8, 6, "3:4"),
+            (6, 8, "4:3"),
+            (8, 10, "5:4"),
+            (10, 8, "4:5"),
+            (9, 16, "16:9"),
+            (16, 9, "9:16"),
+        ]
 
-        final_x0_hat, final_x = run_ddim_visualization(
-            model=ema_model,
-            initial_noise=small_noise,
-            pos_text_cond=pos_text_cond,
-            null_text_cond=null_text_cond,
-            alpha_bar_fn=alpha_bar_cosine,
-            render_image_fn=render_image,
-            num_steps=50,
-            cfg_scale=1.0,
-            eta=1.0,
-            render_every=1000,
-            device=torch.device("cuda")
-        )
+        for (height, width, name) in sizes:
+            grid_noise = torch.randn(100, 1, rf * height, rf * width).to(device)
 
-        final_x0_hat, final_x = run_ddim_visualization(
-            model=ema_model,
-            initial_noise=medium_noise,
-            pos_text_cond=pos_text_cond,
-            null_text_cond=null_text_cond,
-            alpha_bar_fn=alpha_bar_cosine,
-            render_image_fn=render_image,
-            num_steps=50,
-            cfg_scale=1.0,
-            eta=1.0,
-            render_every=1000,
-            device=torch.device("cuda")
-        )
-
-        final_x0_hat, final_x = run_ddim_visualization(
-            model=ema_model,
-            initial_noise=big_noise,
-            pos_text_cond=pos_text_cond,
-            null_text_cond=null_text_cond,
-            alpha_bar_fn=alpha_bar_cosine,
-            render_image_fn=render_image,
-            num_steps=20,
-            cfg_scale=1.0,
-            eta=1.0,
-            render_every=1000,
-            device=torch.device("cuda")
-        )
+            final_x0_hat, final_x = run_ddim_visualization(
+                model=model,
+                initial_noise=grid_noise,
+                pos_text_cond=pos_text_cond,
+                null_text_cond=null_text_cond,
+                alpha_bar_fn=alpha_bar_cosine,
+                render_image_fn=render_image,
+                num_steps=100,
+                cfg_scale=4.0,  # change to 1.0 for sdxl
+                eta=2.0,  # change to 1.0 for sdxl
+                render_every=1000,
+                device=torch.device("cuda"),
+                title=f"{name} - H:{rf * height}, W:{rf * width}"
+            )
 
     # MODEL SAVING
     if (E + 1) % 1 == 0 or E == num_epochs:
