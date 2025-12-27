@@ -344,8 +344,8 @@ class SIID(nn.Module):
 
         self.latent_to_epsilon = nn.Conv2d(d_channels, c_channels, 1)
 
-        nn.init.zeros_(self.latent_to_epsilon[-2].weight)
-        nn.init.zeros_(self.latent_to_epsilon[-2].bias)
+        nn.init.zeros_(self.latent_to_epsilon.weight)
+        nn.init.zeros_(self.latent_to_epsilon.bias)
 
         self.pos_embed = PosEmbed2d(pos_high_freq, pos_low_freq)
         self.time_embed = ContTimeEmbed(time_high_freq, time_low_freq)
