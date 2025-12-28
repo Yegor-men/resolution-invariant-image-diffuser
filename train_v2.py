@@ -14,7 +14,7 @@ def one_hot_encode(label):
     return torch.nn.functional.one_hot(torch.tensor(label), num_classes=10).float()
 
 
-image_size = 28
+image_size = 32
 
 
 class OneHotMNIST(torch.utils.data.Dataset):
@@ -56,7 +56,7 @@ model = SIID(
     c_channels=1,
     d_channels=128,
     enc_blocks=8,
-    dec_blocks=8,
+    dec_blocks=2,
     num_heads=8,
     pos_high_freq=8,
     pos_low_freq=3,
@@ -67,6 +67,7 @@ model = SIID(
     cross_dropout=0.1,
     ffn_dropout=0.2,
     share_weights=False,
+    scale_factor=8,
 ).to(device)
 
 model.print_model_summary()
@@ -120,7 +121,7 @@ def make_cosine_with_warmup(optimizer, warmup_steps, total_steps, lr_end):
 
 
 num_epochs = 20
-batch_size = 25
+batch_size = 50
 ema_decay = 0.9995
 
 train_dloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
@@ -373,16 +374,18 @@ for E in range(num_epochs):
         null_text_cond = text_encoder(torch.zeros_like(positive_label))
 
         sizes = [
-            (28, 28, "1:1"),
-            (18, 27, "3:2"),
-            (27, 18, "2:3"),
-            (32, 24, "3:4"),
-            (24, 32, "4:3"),
-            (24, 30, "5:4"),
-            (30, 24, "4:5"),
-            (18, 32, "16:9"),
-            (32, 18, "9:16"),
-            (56, 56, "Double Resolution"),
+            (32, 32, "1:1"),
+            # (24, 40, "foo"),
+            # (40, 24, "bar"),
+            # (18, 27, "3:2"),
+            # (27, 18, "2:3"),
+            # (32, 24, "3:4"),
+            # (24, 32, "4:3"),
+            # (24, 30, "5:4"),
+            # (30, 24, "4:5"),
+            # (18, 32, "16:9"),
+            # (32, 18, "9:16"),
+            (64, 64, "Double Resolution"),
         ]
 
         for (height, width, name) in sizes:

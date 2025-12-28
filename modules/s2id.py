@@ -166,8 +166,6 @@ class AxialAttention(nn.Module):
     def forward(self, image):
         b, d, h, w = image.shape
 
-        # attn_mask is there for EncBlock to use to do the gaussian masking
-
         x_row = image.permute(0, 2, 3, 1).contiguous().view(b * h, w, d)
         attn_row_out, _ = self.row_mha(x_row, x_row, x_row, need_weights=False)
         attn_row_out = attn_row_out.view(b, h, w, d).permute(0, 3, 1, 2).contiguous()
@@ -310,6 +308,23 @@ class DecBlock(nn.Module):
         return final_image
 
 
+class Interp(nn.Module):
+    def __init__(self, scale, foo, mode="bilinear"):
+        super().__init__()
+        self.scale = scale
+        self.mode = mode
+        self.up = True if foo == "up" else False
+
+    def forward(self, x):
+        return nn.functional.interpolate(
+            x,
+            scale_factor=self.scale if self.up else 1 / self.scale,
+            mode=self.mode,
+            align_corners=False,
+            antialias=not self.up,  # only matters when shrinking
+        )
+
+
 # ======================================================================================================================
 
 class SIID(nn.Module):
@@ -329,6 +344,7 @@ class SIID(nn.Module):
             cross_dropout: float = 0.0,
             ffn_dropout: float = 0.0,
             share_weights: bool = False,
+            scale_factor: int = 4,
     ):
         super().__init__()
         self.c_channels = int(c_channels)
@@ -339,13 +355,28 @@ class SIID(nn.Module):
         self.num_pos_frequencies = int(pos_low_freq + pos_high_freq)
         self.num_time_frequencies = int(time_low_freq + time_high_freq)
         self.film_dim = int(film_dim)
+        self.scale_factor = int(scale_factor)
 
-        self.proj_to_latent = nn.Conv2d(self.num_pos_frequencies * 4 * 2 + c_channels, d_channels, 1)
+        self.proj_to_latent_8 = nn.Conv2d(self.num_pos_frequencies * 4 * 2 + c_channels, d_channels, 1)
+        self.proj_to_latent_4 = nn.Conv2d(self.num_pos_frequencies * 4 * 2 + c_channels, d_channels, 1)
+        self.proj_to_latent_2 = nn.Conv2d(self.num_pos_frequencies * 4 * 2 + c_channels, d_channels, 1)
+        self.proj_to_latent_1 = nn.Conv2d(self.num_pos_frequencies * 4 * 2 + c_channels, d_channels, 1)
 
-        self.latent_to_epsilon = nn.Conv2d(d_channels, c_channels, 1)
+        self.latent_to_epsilon_8 = nn.Conv2d(d_channels, c_channels, 1)
+        nn.init.zeros_(self.latent_to_epsilon_8.weight)
+        nn.init.zeros_(self.latent_to_epsilon_8.bias)
 
-        nn.init.zeros_(self.latent_to_epsilon.weight)
-        nn.init.zeros_(self.latent_to_epsilon.bias)
+        self.latent_to_epsilon_4 = nn.Conv2d(d_channels, c_channels, 1)
+        nn.init.zeros_(self.latent_to_epsilon_4.weight)
+        nn.init.zeros_(self.latent_to_epsilon_4.bias)
+
+        self.latent_to_epsilon_2 = nn.Conv2d(d_channels, c_channels, 1)
+        nn.init.zeros_(self.latent_to_epsilon_2.weight)
+        nn.init.zeros_(self.latent_to_epsilon_2.bias)
+
+        self.latent_to_epsilon_1 = nn.Conv2d(d_channels, c_channels, 1)
+        nn.init.zeros_(self.latent_to_epsilon_1.weight)
+        nn.init.zeros_(self.latent_to_epsilon_1.bias)
 
         self.pos_embed = PosEmbed2d(pos_high_freq, pos_low_freq)
         self.time_embed = ContTimeEmbed(time_high_freq, time_low_freq)
@@ -356,18 +387,18 @@ class SIID(nn.Module):
             nn.SiLU()
         )
 
-        self.enc_blocks = nn.ModuleList([
-            EncBlock(
-                d_channels=d_channels,
-                num_heads=num_heads,
-                film_dim=film_dim,
-                axial_dropout=axial_dropout,
-                ffn_dropout=ffn_dropout,
-                share_weights=share_weights
-            ) for _ in range(enc_blocks)
-        ])
+        # self.enc_blocks = nn.ModuleList([
+        #     EncBlock(
+        #         d_channels=d_channels,
+        #         num_heads=num_heads,
+        #         film_dim=film_dim,
+        #         axial_dropout=axial_dropout,
+        #         ffn_dropout=ffn_dropout,
+        #         share_weights=share_weights
+        #     ) for _ in range(enc_blocks)
+        # ])
 
-        self.dec_blocks = nn.ModuleList([
+        self.d8 = nn.ModuleList([
             DecBlock(
                 d_channels=d_channels,
                 num_heads=num_heads,
@@ -379,44 +410,176 @@ class SIID(nn.Module):
             ) for _ in range(dec_blocks)
         ])
 
+        self.d4 = nn.ModuleList([
+            DecBlock(
+                d_channels=d_channels,
+                num_heads=num_heads,
+                film_dim=film_dim,
+                axial_dropout=axial_dropout,
+                ffn_dropout=ffn_dropout,
+                cross_dropout=cross_dropout,
+                share_weights=share_weights
+            ) for _ in range(dec_blocks)
+        ])
+
+        self.d2 = nn.ModuleList([
+            DecBlock(
+                d_channels=d_channels,
+                num_heads=num_heads,
+                film_dim=film_dim,
+                axial_dropout=axial_dropout,
+                ffn_dropout=ffn_dropout,
+                cross_dropout=cross_dropout,
+                share_weights=share_weights
+            ) for _ in range(dec_blocks)
+        ])
+
+        self.d1 = nn.ModuleList([
+            DecBlock(
+                d_channels=d_channels,
+                num_heads=num_heads,
+                film_dim=film_dim,
+                axial_dropout=axial_dropout,
+                ffn_dropout=ffn_dropout,
+                cross_dropout=cross_dropout,
+                share_weights=share_weights
+            ) for _ in range(dec_blocks)
+        ])
+
+        # self.dec_blocks = nn.ModuleList([
+        #     DecBlock(
+        #         d_channels=d_channels,
+        #         num_heads=num_heads,
+        #         film_dim=film_dim,
+        #         axial_dropout=axial_dropout,
+        #         ffn_dropout=ffn_dropout,
+        #         cross_dropout=cross_dropout,
+        #         share_weights=share_weights
+        #     ) for _ in range(dec_blocks)
+        # ])
+
+        self.up = Interp(2, "up")
+        self.down = Interp(2, "down")
+
     def print_model_summary(self):
         total = sum(p.numel() for p in self.parameters() if p.requires_grad)
         print(f"Trainable parameters: {total:,}")
 
         total_pos_channels = self.num_pos_frequencies * 2 * 2 * 2  # x/y, sin/cos, rel/abs
-        total_col_channels = self.c_channels * self.rescale_factor ** 2
+        total_col_channels = self.c_channels
         total_channels = total_pos_channels + total_col_channels
 
         print(f"Channels for color/positioning: {total_col_channels}/{total_pos_channels}, total: {total_channels}")
 
     def forward(self, image: torch.Tensor, alpha_bar: torch.Tensor, text_conds: list[torch.Tensor]):
-        # assert image.size(-1) % self.reduction_size == 0, f"Image width must be divisible by {self.reduction_size}"
-        # assert image.size(-2) % self.reduction_size == 0, f"Image height must be divisible by {self.reduction_size}"
+        assert image.size(-1) % self.scale_factor == 0, f"Image width must be divisible by {self.scale_factor}"
+        assert image.size(-2) % self.scale_factor == 0, f"Image height must be divisible by {self.scale_factor}"
         assert image.ndim == 4, "Image must be batch, tensor shape of [B, C, H, W]"
-        b, c, h, w = image.shape
 
-        rel_pos_map = self.pos_embed(b, h, w, True)
-        abs_pos_map = self.pos_embed(b, h, w, False)
-        pos_map = torch.cat([rel_pos_map, abs_pos_map], dim=-3)
-        # shuffled_pos_map = self.pixel_unshuffle(pos_map)
-        # pos_cond = self.pos_proj(shuffled_pos_map)
+        # img_down = nn.functional.interpolate(image, scale_factor=1 / self.scale_factor, mode="bilinear", antialias=True)
+        # b, c, h, w = img_down.shape
+        #
+        # time_vector = self.time_embed(alpha_bar)  # [B, time_dim]
+        # film_vector = self.film_proj(time_vector)
+        #
+        # rel_pos_map = self.pos_embed(b, h, w, True)
+        # abs_pos_map = self.pos_embed(b, h, w, False)
+        # pos_map = torch.cat([rel_pos_map, abs_pos_map], dim=-3)
+        #
+        # stacked_latent = torch.cat([img_down, pos_map], dim=-3)
+        # latent = self.proj_to_latent(stacked_latent)
+        #
+        # for i, enc_block in enumerate(self.enc_blocks):
+        #     latent = enc_block(latent, film_vector)
+        #
+        # # text_conds is a list of tensors, each tensor is the token conditioning
+        # epsilon_list = []
+        # for token_sequence in text_conds:
+        #     latent_copy = latent
+        #     for i, dec_block in enumerate(self.dec_blocks):
+        #         latent_copy = dec_block(latent_copy, film_vector, token_sequence)
+        #     small_eps = self.latent_to_epsilon(latent_copy)
+        #     big_eps = nn.functional.interpolate(small_eps, scale_factor=self.scale_factor, mode="bicubic")
+        #     temp = torch.cat([big_eps, image], dim=-3)
+        #     epsilon = self.foo(temp, film_vector)
+        #     epsilon_list.append(epsilon)
+        #
+        # return epsilon_list
 
-        stacked_latent = torch.cat([image, pos_map], dim=-3)
-        latent = self.proj_to_latent(stacked_latent)
+        epsilon_list = []
+
+        img_down_2 = self.down(image)
+        img_down_4 = self.down(img_down_2)
+        img_down_8 = self.down(img_down_4)
 
         time_vector = self.time_embed(alpha_bar)  # [B, time_dim]
         film_vector = self.film_proj(time_vector)
 
-        for i, enc_block in enumerate(self.enc_blocks):
-            latent = enc_block(latent, film_vector)
-
-        # text_conds is a list of tensors, each tensor is the token conditioning
-        epsilon_list = []
         for token_sequence in text_conds:
-            latent_copy = latent
-            for i, dec_block in enumerate(self.dec_blocks):
-                latent_copy = dec_block(latent_copy, film_vector, token_sequence)
-            epsilon = self.latent_to_epsilon(latent_copy)
+            img_8 = img_down_8
+            b, c, h, w = img_8.shape
+            rel_pos_map_8 = self.pos_embed(b, h, w, True)
+            abs_pos_map_8 = self.pos_embed(b, h, w, False)
+            pos_map_8 = torch.cat([rel_pos_map_8, abs_pos_map_8], dim=-3)
+
+            stacked_latent_8 = torch.cat([img_8, pos_map_8], dim=-3)
+            latent_8 = self.proj_to_latent_8(stacked_latent_8)
+
+            for i, dec_block in enumerate(self.d8):
+                latent_8 = dec_block(latent_8, film_vector, token_sequence)
+            eps_8 = self.latent_to_epsilon_8(latent_8)
+            eps_4 = self.up(eps_8)
+
+            # print(f"Down 8 sucess")
+            # dfsd
+
+            img_4 = img_down_4 - eps_4
+            b, c, h, w = img_4.shape
+            rel_pos_map_4 = self.pos_embed(b, h, w, True)
+            abs_pos_map_4 = self.pos_embed(b, h, w, False)
+            pos_map_4 = torch.cat([rel_pos_map_4, abs_pos_map_4], dim=-3)
+
+            stacked_latent_4 = torch.cat([img_4, pos_map_4], dim=-3)
+            latent_4 = self.proj_to_latent_4(stacked_latent_4)
+
+            for i, dec_block in enumerate(self.d4):
+                latent_4 = dec_block(latent_4, film_vector, token_sequence)
+            eps_4 = self.latent_to_epsilon_4(latent_4)
+            eps_2 = self.up(eps_4)
+
+            # print(f"Down 4 sucess")
+            # fadsfa
+
+            img_2 = img_down_2 - eps_2
+            b, c, h, w = img_2.shape
+            rel_pos_map_2 = self.pos_embed(b, h, w, True)
+            abs_pos_map_2 = self.pos_embed(b, h, w, False)
+            pos_map_2 = torch.cat([rel_pos_map_2, abs_pos_map_2], dim=-3)
+
+            stacked_latent_2 = torch.cat([img_2, pos_map_2], dim=-3)
+            latent_2 = self.proj_to_latent_2(stacked_latent_2)
+
+            for i, dec_block in enumerate(self.d2):
+                latent_2 = dec_block(latent_2, film_vector, token_sequence)
+            eps_2 = self.latent_to_epsilon_2(latent_2)
+            eps_1 = self.up(eps_2)
+
+            # print(f"Down 2 sucess")
+            # ddfdfs
+
+            img_1 = image - eps_1
+            b, c, h, w = img_1.shape
+            rel_pos_map_1 = self.pos_embed(b, h, w, True)
+            abs_pos_map_1 = self.pos_embed(b, h, w, False)
+            pos_map_1 = torch.cat([rel_pos_map_1, abs_pos_map_1], dim=-3)
+
+            stacked_latent_1 = torch.cat([img_1, pos_map_1], dim=-3)
+            latent_1 = self.proj_to_latent_1(stacked_latent_1)
+
+            for i, dec_block in enumerate(self.d1):
+                latent_1 = dec_block(latent_1, film_vector, token_sequence)
+            epsilon = self.latent_to_epsilon_1(latent_1)
+
             epsilon_list.append(epsilon)
 
         return epsilon_list
