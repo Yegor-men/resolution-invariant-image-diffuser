@@ -55,7 +55,7 @@ from modules.dummy_textencoder import DummyTextCond
 model = SIID(
     c_channels=1,
     d_channels=128,
-    enc_blocks=8,
+    enc_blocks=2,
     dec_blocks=2,
     num_heads=8,
     pos_high_freq=8,
@@ -127,8 +127,8 @@ ema_decay = 0.9995
 train_dloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 test_dloader = DataLoader(test_dataset, batch_size=batch_size, shuffle=True)
 
-peak_lr = 1e-3
-final_lr = 1e-5
+peak_lr = 1e-4
+final_lr = 1e-6
 total_steps = num_epochs * len(train_dloader)
 warmup_steps = len(train_dloader)
 
