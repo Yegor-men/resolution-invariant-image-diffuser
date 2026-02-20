@@ -147,34 +147,67 @@ class AxialAttention(nn.Module):
         super().__init__()
         assert d_channels % num_heads == 0, f"d_channels ({d_channels}) must be divisible by num_heads ({num_heads})"
 
-        self.row_mha = nn.MultiheadAttention(
+        self.divisor = 8
+
+        # self.row_mha = nn.MultiheadAttention(
+        #     embed_dim=d_channels,
+        #     num_heads=num_heads,
+        #     batch_first=True,
+        #     dropout=dropout,
+        # )
+        # if share_weights:
+        #     self.col_mha = self.row_mha
+        # else:
+        #     self.col_mha = nn.MultiheadAttention(
+        #         embed_dim=d_channels,
+        #         num_heads=num_heads,
+        #         batch_first=True,
+        #         dropout=dropout,
+        #     )
+
+        self.mha = nn.MultiheadAttention(
             embed_dim=d_channels,
             num_heads=num_heads,
             batch_first=True,
             dropout=dropout,
         )
-        if share_weights:
-            self.col_mha = self.row_mha
-        else:
-            self.col_mha = nn.MultiheadAttention(
-                embed_dim=d_channels,
-                num_heads=num_heads,
-                batch_first=True,
-                dropout=dropout,
-            )
 
     def forward(self, image):
         b, d, h, w = image.shape
+        total_pixels = h * w
 
-        x_row = image.permute(0, 2, 3, 1).contiguous().view(b * h, w, d)
-        attn_row_out, _ = self.row_mha(x_row, x_row, x_row, need_weights=False)
-        attn_row_out = attn_row_out.view(b, h, w, d).permute(0, 3, 1, 2).contiguous()
+        # x_row = image.permute(0, 2, 3, 1).contiguous().view(b * h, w, d)
+        # attn_row_out, _ = self.row_mha(x_row, x_row, x_row, need_weights=False)
+        # attn_row_out = attn_row_out.view(b, h, w, d).permute(0, 3, 1, 2).contiguous()
+        #
+        # x_col = image.permute(0, 3, 2, 1).contiguous().view(b * w, h, d)
+        # attn_col_out, _ = self.col_mha(x_col, x_col, x_col, need_weights=False)
+        # attn_col_out = attn_col_out.view(b, w, h, d).permute(0, 3, 2, 1).contiguous()
+        #
+        # return attn_row_out + attn_col_out
 
-        x_col = image.permute(0, 3, 2, 1).contiguous().view(b * w, h, d)
-        attn_col_out, _ = self.col_mha(x_col, x_col, x_col, need_weights=False)
-        attn_col_out = attn_col_out.view(b, w, h, d).permute(0, 3, 2, 1).contiguous()
+        seed = sum(image.shape) % (2 ** 32)
+        # torch.manual_seed(seed)
+        perm = torch.randperm(total_pixels, device=image.device)
 
-        return attn_row_out + attn_col_out
+        inv_perm = torch.argsort(perm)
+        x_flat = image.view(b, d, total_pixels)
+        x_shuffled = x_flat[:, :, perm]
+
+        group_size = total_pixels // self.divisor
+        x_groups = x_shuffled.permute(0, 2, 1).contiguous().view(b * self.divisor, group_size, d)
+
+        attn_out, _ = self.mha(x_groups, x_groups, x_groups, need_weights=False)
+
+        attn_out = attn_out.view(b, self.divisor, group_size, d).permute(0, 3, 1, 2).contiguous()
+        attn_out = attn_out.view(b, d, total_pixels)
+
+        attn_out = attn_out[:, :, inv_perm]
+
+        # Reshape back to image format
+        attn_out = attn_out.view(b, d, h, w)
+
+        return attn_out
 
 
 class EncBlock(nn.Module):
@@ -417,27 +450,44 @@ class SIID(nn.Module):
         film_vector = self.film_proj(time_vector)
 
         for token_sequence in text_conds:
-            epsilon = torch.zeros_like(image)
-            for scale in (8, 4, 2, 1):
-                scaled_image = self.down(image, scale)
-                b, c, h, w = scaled_image.shape
-                rel_pos_map = self.pos_embed(b, h, w, True)
-                abs_pos_map = self.pos_embed(b, h, w, False)
-                pos_map = torch.cat([rel_pos_map, abs_pos_map], dim=-3)
+            b, c, h, w = image.shape
+            rel_pos_map = self.pos_embed(b, h, w, True)
+            abs_pos_map = self.pos_embed(b, h, w, False)
+            pos_map = torch.cat([rel_pos_map, abs_pos_map], dim=-3)
 
-                stacked_latent = torch.cat([scaled_image, pos_map], dim=-3)
-                latent = self.proj_to_latent(stacked_latent)
+            stacked_latent = torch.cat([image, pos_map], dim=-3)
+            latent = self.proj_to_latent(stacked_latent)
 
-                for i, enc_block in enumerate(self.enc_blocks):
-                    latent = enc_block(latent, film_vector)
+            for i, enc_block in enumerate(self.enc_blocks):
+                latent = enc_block(latent, film_vector)
 
-                for i, dec_block in enumerate(self.dec_blocks):
-                    latent = dec_block(latent, film_vector, token_sequence)
+            for i, dec_block in enumerate(self.dec_blocks):
+                latent = dec_block(latent, film_vector, token_sequence)
 
-                eps = self.latent_to_epsilon(latent)
-                epsilon = epsilon + self.up(eps, scale)
+            eps = self.latent_to_epsilon(latent)
+            epsilon_list.append(eps)
 
-            epsilon = epsilon / 4
-            epsilon_list.append(epsilon)
+            # epsilon = torch.zeros_like(image)
+            # for scale in (8, 4, 2, 1):
+            #     scaled_image = self.down(image, scale)
+            #     b, c, h, w = scaled_image.shape
+            #     rel_pos_map = self.pos_embed(b, h, w, True)
+            #     abs_pos_map = self.pos_embed(b, h, w, False)
+            #     pos_map = torch.cat([rel_pos_map, abs_pos_map], dim=-3)
+            #
+            #     stacked_latent = torch.cat([scaled_image, pos_map], dim=-3)
+            #     latent = self.proj_to_latent(stacked_latent)
+            #
+            #     for i, enc_block in enumerate(self.enc_blocks):
+            #         latent = enc_block(latent, film_vector)
+            #
+            #     for i, dec_block in enumerate(self.dec_blocks):
+            #         latent = dec_block(latent, film_vector, token_sequence)
+            #
+            #     eps = self.latent_to_epsilon(latent)
+            #     epsilon = epsilon + self.up(eps, scale)
+            #
+            # epsilon = epsilon / 4
+            # epsilon_list.append(epsilon)
 
         return epsilon_list

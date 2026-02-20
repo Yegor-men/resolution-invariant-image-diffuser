@@ -55,8 +55,8 @@ from modules.dummy_textencoder import DummyTextCond
 model = SIID(
     c_channels=1,
     d_channels=128,
-    enc_blocks=2,
-    dec_blocks=2,
+    enc_blocks=4,
+    dec_blocks=4,
     num_heads=8,
     pos_high_freq=8,
     pos_low_freq=3,
