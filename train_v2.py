@@ -55,8 +55,8 @@ from modules.dummy_textencoder import DummyTextCond
 model = RIID(
     c_channels=1,
     d_channels=128,
-    enc_blocks=2,
-    dec_blocks=2,
+    enc_blocks=8,
+    dec_blocks=8,
     num_heads=8,
     pos_high_freq=8,
     pos_low_freq=3,
@@ -120,7 +120,7 @@ def make_cosine_with_warmup(optimizer, warmup_steps, total_steps, lr_end):
 
 
 num_epochs = 20
-batch_size = 50
+batch_size = 25
 ema_decay = 0.9995
 
 train_dloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
