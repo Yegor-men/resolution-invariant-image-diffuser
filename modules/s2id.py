@@ -142,28 +142,10 @@ class CrossAttention(nn.Module):
         return attn_out
 
 
-class AxialAttention(nn.Module):
-    def __init__(self, d_channels: int, num_heads: int, dropout: float = 0.0, share_weights: bool = True):
+class CloudAttention(nn.Module):
+    def __init__(self, d_channels: int, num_heads: int, dropout: float = 0.0):
         super().__init__()
         assert d_channels % num_heads == 0, f"d_channels ({d_channels}) must be divisible by num_heads ({num_heads})"
-
-        self.divisor = 8
-
-        # self.row_mha = nn.MultiheadAttention(
-        #     embed_dim=d_channels,
-        #     num_heads=num_heads,
-        #     batch_first=True,
-        #     dropout=dropout,
-        # )
-        # if share_weights:
-        #     self.col_mha = self.row_mha
-        # else:
-        #     self.col_mha = nn.MultiheadAttention(
-        #         embed_dim=d_channels,
-        #         num_heads=num_heads,
-        #         batch_first=True,
-        #         dropout=dropout,
-        #     )
 
         self.mha = nn.MultiheadAttention(
             embed_dim=d_channels,
@@ -172,34 +154,22 @@ class AxialAttention(nn.Module):
             dropout=dropout,
         )
 
-    def forward(self, image):
+    def forward(self, image, num_groups: int):
         b, d, h, w = image.shape
         total_pixels = h * w
 
-        # x_row = image.permute(0, 2, 3, 1).contiguous().view(b * h, w, d)
-        # attn_row_out, _ = self.row_mha(x_row, x_row, x_row, need_weights=False)
-        # attn_row_out = attn_row_out.view(b, h, w, d).permute(0, 3, 1, 2).contiguous()
-        #
-        # x_col = image.permute(0, 3, 2, 1).contiguous().view(b * w, h, d)
-        # attn_col_out, _ = self.col_mha(x_col, x_col, x_col, need_weights=False)
-        # attn_col_out = attn_col_out.view(b, w, h, d).permute(0, 3, 2, 1).contiguous()
-        #
-        # return attn_row_out + attn_col_out
-
-        seed = sum(image.shape) % (2 ** 32)
-        # torch.manual_seed(seed)
         perm = torch.randperm(total_pixels, device=image.device)
 
         inv_perm = torch.argsort(perm)
         x_flat = image.view(b, d, total_pixels)
         x_shuffled = x_flat[:, :, perm]
 
-        group_size = total_pixels // self.divisor
-        x_groups = x_shuffled.permute(0, 2, 1).contiguous().view(b * self.divisor, group_size, d)
+        group_size = total_pixels // num_groups
+        x_groups = x_shuffled.permute(0, 2, 1).contiguous().view(b * num_groups, group_size, d)
 
         attn_out, _ = self.mha(x_groups, x_groups, x_groups, need_weights=False)
 
-        attn_out = attn_out.view(b, self.divisor, group_size, d).permute(0, 3, 1, 2).contiguous()
+        attn_out = attn_out.view(b, num_groups, group_size, d).permute(0, 3, 1, 2).contiguous()
         attn_out = attn_out.view(b, d, total_pixels)
 
         attn_out = attn_out[:, :, inv_perm]
@@ -216,22 +186,20 @@ class EncBlock(nn.Module):
             d_channels: int,
             num_heads: int,
             film_dim: int,
-            axial_dropout: float = 0.0,
+            cloud_dropout: float = 0.0,
             ffn_dropout: float = 0.0,
-            share_weights: bool = True,
     ):
         super().__init__()
         self.d_channels = d_channels
 
-        self.axial_norm = nn.GroupNorm(num_heads, d_channels)
-        self.axial_film = FiLM(film_dim, d_channels)
-        self.axial_attn = AxialAttention(
+        self.cloud_norm = nn.GroupNorm(num_heads, d_channels)
+        self.cloud_film = FiLM(film_dim, d_channels)
+        self.cloud_attn = CloudAttention(
             d_channels=d_channels,
             num_heads=num_heads,
-            dropout=axial_dropout,
-            share_weights=share_weights,
+            dropout=cloud_dropout,
         )
-        self.axial_scalar = nn.Parameter(torch.ones(d_channels))
+        self.cloud_scalar = nn.Parameter(torch.ones(d_channels))
 
         self.ffn_norm = nn.GroupNorm(1, d_channels)
         self.ffn_film = FiLM(film_dim, d_channels)
@@ -245,15 +213,15 @@ class EncBlock(nn.Module):
 
         self.final_scalar = nn.Parameter(torch.ones(d_channels) * 0.1)
 
-    def forward(self, image, film_vector):
+    def forward(self, image, film_vector, divisor):
         working_image = image
 
-        axial_norm = self.axial_norm(working_image)
-        axial_g, axial_b = self.axial_film(film_vector)
-        axial_filmed = axial_norm * axial_g.unsqueeze(-1).unsqueeze(-1) + axial_b.unsqueeze(-1).unsqueeze(-1)
-        axial_out = self.axial_attn(axial_filmed)
+        cloud_norm = self.cloud_norm(working_image)
+        cloud_g, cloud_b = self.cloud_film(film_vector)
+        cloud_filmed = cloud_norm * cloud_g.unsqueeze(-1).unsqueeze(-1) + cloud_b.unsqueeze(-1).unsqueeze(-1)
+        cloud_out = self.cloud_attn(cloud_filmed, divisor)
 
-        working_image = working_image + axial_out * self.axial_scalar.view(1, self.d_channels, 1, 1)
+        working_image = working_image + cloud_out * self.cloud_scalar.view(1, self.d_channels, 1, 1)
 
         ffn_norm = self.ffn_norm(working_image)
         ffn_g, ffn_b = self.ffn_film(film_vector)
@@ -273,23 +241,21 @@ class DecBlock(nn.Module):
             d_channels: int,
             num_heads: int,
             film_dim: int,
-            axial_dropout: float = 0.0,
+            cloud_dropout: float = 0.0,
             cross_dropout: float = 0.0,
             ffn_dropout: float = 0.0,
-            share_weights: bool = True,
     ):
         super().__init__()
         self.d_channels = d_channels
 
-        self.axial_norm = nn.GroupNorm(num_heads, d_channels)
-        self.axial_film = FiLM(film_dim, d_channels)
-        self.axial_attn = AxialAttention(
+        self.cloud_norm = nn.GroupNorm(num_heads, d_channels)
+        self.cloud_film = FiLM(film_dim, d_channels)
+        self.cloud_attn = CloudAttention(
             d_channels=d_channels,
             num_heads=num_heads,
-            dropout=axial_dropout,
-            share_weights=share_weights,
+            dropout=cloud_dropout,
         )
-        self.axial_scalar = nn.Parameter(torch.ones(d_channels))
+        self.cloud_scalar = nn.Parameter(torch.ones(d_channels))
 
         self.cross_norm = nn.GroupNorm(num_heads, d_channels)
         self.cross_film = FiLM(film_dim, d_channels)
@@ -312,15 +278,15 @@ class DecBlock(nn.Module):
 
         self.final_scalar = nn.Parameter(torch.ones(d_channels) * 0.1)
 
-    def forward(self, image, film_vector, text_tokens):
+    def forward(self, image, film_vector, text_tokens, divisor):
         working_image = image
 
-        axial_norm = self.axial_norm(working_image)
-        axial_g, axial_b = self.axial_film(film_vector)
-        axial_filmed = axial_norm * axial_g.unsqueeze(-1).unsqueeze(-1) + axial_b.unsqueeze(-1).unsqueeze(-1)
-        axial_out = self.axial_attn(axial_filmed)
+        cloud_norm = self.cloud_norm(working_image)
+        cloud_g, cloud_b = self.cloud_film(film_vector)
+        cloud_filmed = cloud_norm * cloud_g.unsqueeze(-1).unsqueeze(-1) + cloud_b.unsqueeze(-1).unsqueeze(-1)
+        axial_out = self.cloud_attn(cloud_filmed, divisor)
 
-        working_image = working_image + axial_out * self.axial_scalar.view(1, self.d_channels, 1, 1)
+        working_image = working_image + axial_out * self.cloud_scalar.view(1, self.d_channels, 1, 1)
 
         cross_norm = self.cross_norm(working_image)
         cross_g, cross_b = self.cross_film(film_vector)
@@ -372,10 +338,9 @@ class SIID(nn.Module):
             time_high_freq: int,
             time_low_freq: int,
             film_dim: int,  # dimension that the base film vector sits in, then gets turned to d channels
-            axial_dropout: float = 0.0,
+            cloud_dropout: float = 0.0,
             cross_dropout: float = 0.0,
             ffn_dropout: float = 0.0,
-            share_weights: bool = False,
             scale_factor: int = 4,
     ):
         super().__init__()
@@ -408,9 +373,8 @@ class SIID(nn.Module):
                 d_channels=d_channels,
                 num_heads=num_heads,
                 film_dim=film_dim,
-                axial_dropout=axial_dropout,
+                cloud_dropout=cloud_dropout,
                 ffn_dropout=ffn_dropout,
-                share_weights=share_weights
             ) for _ in range(enc_blocks)
         ])
 
@@ -419,10 +383,9 @@ class SIID(nn.Module):
                 d_channels=d_channels,
                 num_heads=num_heads,
                 film_dim=film_dim,
-                axial_dropout=axial_dropout,
+                cloud_dropout=cloud_dropout,
                 ffn_dropout=ffn_dropout,
                 cross_dropout=cross_dropout,
-                share_weights=share_weights
             ) for _ in range(dec_blocks)
         ])
 
@@ -440,8 +403,8 @@ class SIID(nn.Module):
         print(f"Channels for color/positioning: {total_col_channels}/{total_pos_channels}, total: {total_channels}")
 
     def forward(self, image: torch.Tensor, alpha_bar: torch.Tensor, text_conds: list[torch.Tensor]):
-        assert image.size(-1) % self.scale_factor == 0, f"Image width must be divisible by {self.scale_factor}"
-        assert image.size(-2) % self.scale_factor == 0, f"Image height must be divisible by {self.scale_factor}"
+        # assert image.size(-1) % self.scale_factor == 0, f"Image width must be divisible by {self.scale_factor}"
+        # assert image.size(-2) % self.scale_factor == 0, f"Image height must be divisible by {self.scale_factor}"
         assert image.ndim == 4, "Image must be batch, tensor shape of [B, C, H, W]"
 
         epsilon_list = []
@@ -450,44 +413,45 @@ class SIID(nn.Module):
         film_vector = self.film_proj(time_vector)
 
         for token_sequence in text_conds:
-            b, c, h, w = image.shape
-            rel_pos_map = self.pos_embed(b, h, w, True)
-            abs_pos_map = self.pos_embed(b, h, w, False)
-            pos_map = torch.cat([rel_pos_map, abs_pos_map], dim=-3)
-
-            stacked_latent = torch.cat([image, pos_map], dim=-3)
-            latent = self.proj_to_latent(stacked_latent)
-
-            for i, enc_block in enumerate(self.enc_blocks):
-                latent = enc_block(latent, film_vector)
-
-            for i, dec_block in enumerate(self.dec_blocks):
-                latent = dec_block(latent, film_vector, token_sequence)
-
-            eps = self.latent_to_epsilon(latent)
-            epsilon_list.append(eps)
-
-            # epsilon = torch.zeros_like(image)
-            # for scale in (8, 4, 2, 1):
-            #     scaled_image = self.down(image, scale)
-            #     b, c, h, w = scaled_image.shape
-            #     rel_pos_map = self.pos_embed(b, h, w, True)
-            #     abs_pos_map = self.pos_embed(b, h, w, False)
-            #     pos_map = torch.cat([rel_pos_map, abs_pos_map], dim=-3)
+            # b, c, h, w = image.shape
+            # rel_pos_map = self.pos_embed(b, h, w, True)
+            # abs_pos_map = self.pos_embed(b, h, w, False)
+            # pos_map = torch.cat([rel_pos_map, abs_pos_map], dim=-3)
             #
-            #     stacked_latent = torch.cat([scaled_image, pos_map], dim=-3)
-            #     latent = self.proj_to_latent(stacked_latent)
+            # stacked_latent = torch.cat([image, pos_map], dim=-3)
+            # latent = self.proj_to_latent(stacked_latent)
             #
-            #     for i, enc_block in enumerate(self.enc_blocks):
-            #         latent = enc_block(latent, film_vector)
+            # for i, enc_block in enumerate(self.enc_blocks):
+            #     latent = enc_block(latent, film_vector)
             #
-            #     for i, dec_block in enumerate(self.dec_blocks):
-            #         latent = dec_block(latent, film_vector, token_sequence)
+            # for i, dec_block in enumerate(self.dec_blocks):
+            #     latent = dec_block(latent, film_vector, token_sequence)
             #
-            #     eps = self.latent_to_epsilon(latent)
-            #     epsilon = epsilon + self.up(eps, scale)
-            #
-            # epsilon = epsilon / 4
-            # epsilon_list.append(epsilon)
+            # eps = self.latent_to_epsilon(latent)
+            # epsilon_list.append(eps)
+
+            epsilon = torch.zeros_like(image)
+            for scale in (8, 4, 2, 1):
+                divisor = (8 // scale) ** 2
+                scaled_image = self.down(image, scale)
+                b, c, h, w = scaled_image.shape
+                rel_pos_map = self.pos_embed(b, h, w, True)
+                abs_pos_map = self.pos_embed(b, h, w, False)
+                pos_map = torch.cat([rel_pos_map, abs_pos_map], dim=-3)
+
+                stacked_latent = torch.cat([scaled_image, pos_map], dim=-3)
+                latent = self.proj_to_latent(stacked_latent)
+
+                for i, enc_block in enumerate(self.enc_blocks):
+                    latent = enc_block(latent, film_vector, divisor)
+
+                for i, dec_block in enumerate(self.dec_blocks):
+                    latent = dec_block(latent, film_vector, token_sequence, divisor)
+
+                eps = self.latent_to_epsilon(latent)
+                epsilon = epsilon + self.up(eps, scale)
+
+            epsilon = epsilon / 2.0
+            epsilon_list.append(epsilon)
 
         return epsilon_list
