@@ -55,8 +55,8 @@ from modules.dummy_textencoder import DummyTextCond
 model = SIID(
     c_channels=1,
     d_channels=128,
-    enc_blocks=4,
-    dec_blocks=4,
+    enc_blocks=2,
+    dec_blocks=2,
     num_heads=8,
     pos_high_freq=8,
     pos_low_freq=3,
@@ -66,7 +66,7 @@ model = SIID(
     cloud_dropout=0.1,
     cross_dropout=0.1,
     ffn_dropout=0.2,
-    scale_factor=8,
+    cloud_groups=8,
 ).to(device)
 
 model.print_model_summary()
@@ -391,7 +391,7 @@ for E in range(num_epochs):
             grid_noise = torch.randn(100, 1, height, width).to(device)
 
             final_x0_hat, final_x = run_ddim_visualization(
-                model=model,
+                model=ema_model,
                 initial_noise=grid_noise,
                 pos_text_cond=pos_text_cond,
                 null_text_cond=null_text_cond,
@@ -404,6 +404,8 @@ for E in range(num_epochs):
                 device=torch.device("cuda"),
                 title=f"{name} - H:{height}, W:{width}"
             )
+
+            del final_x0_hat, final_x
 
     # MODEL SAVING
     if (E + 1) % 1 == 0 or E == num_epochs:
