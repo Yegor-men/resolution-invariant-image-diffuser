@@ -52,10 +52,10 @@ test_dloader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
 device = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"Cuda is available: {torch.cuda.is_available()}")
 
-from modules.s2id import SIID
+from modules.r2id import RIID
 from modules.dummy_textencoder import DummyTextCond
 
-model = SIID(
+model = RIID(
     c_channels=1,
     d_channels=256,
     rescale_factor=8,

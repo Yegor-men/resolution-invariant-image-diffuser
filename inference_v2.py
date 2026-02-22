@@ -5,10 +5,10 @@ from modules.run_ddim_visualization import run_ddim_visualization
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
-from modules.s2id import SIID
+from modules.r2id import RIID
 from modules.dummy_textencoder import DummyTextCond
 
-model = SIID(
+model = RIID(
     c_channels=1,
     d_channels=128,
     enc_blocks=8,

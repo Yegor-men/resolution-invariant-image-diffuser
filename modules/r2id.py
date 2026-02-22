@@ -313,7 +313,7 @@ class DecBlock(nn.Module):
 
 # ======================================================================================================================
 
-class SIID(nn.Module):
+class RIID(nn.Module):
     def __init__(
             self,
             c_channels: int,  # color channels
