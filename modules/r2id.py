@@ -27,10 +27,10 @@ class GRN(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # x: [B, C, H, W]
         # 1. Global L2 response per channel (energy of the whole image per channel)
-        gx = torch.norm(x, p=2, dim=(2, 3), keepdim=True)  # [B, C, 1, 1]
+        gx = torch.norm(x, p=2, dim=(-2, -1), keepdim=True)  # [B, C, 1, 1]
 
         # 2. Normalize responses across channels (competition)
-        nx = gx / (gx.mean(dim=1, keepdim=True) + self.eps)  # relative strength
+        nx = gx / (gx.mean(dim=-3, keepdim=True) + self.eps)  # relative strength
 
         # 3. Apply + learnable calibration + residual
         return (1.0 + self.gamma.unsqueeze(-1).unsqueeze(-1)) * (x * nx) + self.beta.unsqueeze(-1).unsqueeze(-1) + x
