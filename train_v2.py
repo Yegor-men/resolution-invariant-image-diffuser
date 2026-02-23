@@ -55,8 +55,8 @@ from modules.dummy_textencoder import DummyTextCond
 model = RIID(
     c_channels=1,
     d_channels=128,
-    enc_blocks=10,
-    dec_blocks=2,
+    enc_blocks=8,
+    dec_blocks=4,
     num_heads=8,
     pos_high_freq=8,
     pos_low_freq=3,
@@ -67,7 +67,7 @@ model = RIID(
     cross_dropout=0.1,
     ffn_dropout=0.2,
 ).to(device)
-train_num_clouds = 32
+train_num_clouds = 4
 
 model.print_model_summary()
 

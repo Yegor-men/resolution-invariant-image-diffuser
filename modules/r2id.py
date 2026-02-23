@@ -5,7 +5,7 @@ from torch import nn
 class ImageNorm(nn.Module):
     def __init__(self, num_channels: int, affine: bool = False):
         super().__init__()
-        self.norm = nn.RMSNorm(num_channels, elementwise_affine=affine)
+        self.norm = nn.LayerNorm(num_channels, elementwise_affine=affine)
 
     def forward(self, x):
         x = torch.movedim(x, -3, -1)
@@ -46,7 +46,7 @@ class PosEmbed2d(nn.Module):
         frequencies = torch.pi * (2.0 ** powers)  # [..., pi/4, pi/2, pi, 2pi, 4pi, ...]
         self.register_buffer("frequencies", frequencies, persistent=True)
 
-        # self.norm = GRN(4 * self.num_frequencies)
+        self.norm = ImageNorm(4 * self.num_frequencies)
 
     def _make_grid(self, h: int, w: int, relative: bool):
         if relative:
@@ -99,9 +99,9 @@ class PosEmbed2d(nn.Module):
         cos_ch = cos_feat.permute(0, 1, 4, 2, 3).contiguous().view(batch_size, 2 * self.num_frequencies, h, w)
         fourier_ch = torch.cat([sin_ch, cos_ch], dim=1)  # [b, 4F, h, w]
 
-        # positional_embedding = self.norm(fourier_ch)  # [b, 4F, h, w]
+        positional_embedding = self.norm(fourier_ch)  # [b, 4F, h, w]
 
-        return fourier_ch
+        return positional_embedding
 
 
 class ContTimeEmbed(nn.Module):
@@ -363,7 +363,6 @@ class RIID(nn.Module):
         self.num_time_frequencies = int(time_low_freq + time_high_freq)
         self.film_dim = int(film_dim)
 
-        self.pre_norm = GRN(self.num_pos_frequencies * 4 * 2 + c_channels)
         self.proj_to_latent = nn.Conv2d(self.num_pos_frequencies * 4 * 2 + c_channels, d_channels, 1)
         self.latent_to_epsilon = nn.Conv2d(d_channels, c_channels, 1)
         nn.init.zeros_(self.latent_to_epsilon.weight)
@@ -424,7 +423,7 @@ class RIID(nn.Module):
         pos_map = torch.cat([rel_pos_map, abs_pos_map], dim=-3)
 
         stacked_latent = torch.cat([image, pos_map], dim=-3)
-        latent = self.proj_to_latent(self.pre_norm(stacked_latent))
+        latent = self.proj_to_latent(stacked_latent)
 
         for i, enc_block in enumerate(self.enc_blocks):
             latent = enc_block(latent, film_vector, num_clouds)
