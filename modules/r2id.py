@@ -334,6 +334,130 @@ class DecBlock(nn.Module):
         return final_image
 
 
+class RIAE(nn.Module):
+    def __init__(
+            self,
+            c_channels: int = 1,  # 1 for MNIST
+            d_channels: int = 128,  # match your RIID latent dim
+            reduction: int = 4,  # 32 → 8 for MNIST POC
+            pos_high_freq: int = 8,
+            pos_low_freq: int = 3,
+            num_heads: int = 8,
+            dropout: float = 0.1,
+    ):
+        super().__init__()
+        self.c_channels = c_channels
+        self.d_channels = d_channels
+        self.reduction = reduction
+        self.pos_dim = 4 * (pos_high_freq + pos_low_freq)  # same calculation as RIID
+
+        self.pos_embed = PosEmbed2d(pos_high_freq, pos_low_freq)
+
+        # Project input (color + pos) → latent dim
+        self.enc_input_proj = nn.Conv2d(c_channels + self.pos_dim * 2, d_channels, 1)
+
+        # Project latent pos → query dim for encoder
+        self.latent_query_proj = nn.Linear(self.pos_dim * 2, d_channels)
+
+        # Project latent (color + pos) → key/value dim for decoder
+        self.latent_token_proj = nn.Linear(d_channels + self.pos_dim * 2, d_channels)
+
+        # Output head
+        self.dec_out_proj = nn.Conv2d(d_channels, c_channels, 1)
+        nn.init.zeros_(self.dec_out_proj.weight)
+        nn.init.zeros_(self.dec_out_proj.bias)
+
+        # Cross-attention (pure transfer)
+        self.enc_mha = nn.MultiheadAttention(
+            embed_dim=d_channels, num_heads=num_heads, batch_first=True, dropout=dropout
+        )
+        self.dec_mha = nn.MultiheadAttention(
+            embed_dim=d_channels, num_heads=num_heads, batch_first=True, dropout=dropout
+        )
+
+    def _get_pos(self, b: int, h: int, w: int):
+        rel = self.pos_embed(b, h, w, relative=True)
+        abs_ = self.pos_embed(b, h, w, relative=False)
+        return torch.cat([rel, abs_], dim=1)  # [B, 2*pos_dim, H, W]
+
+    def encode(self, image: torch.Tensor, fraction: float = 1 / 16.0) -> torch.Tensor:
+        """[B, C, H, W] → [B, D, lh, lw] pure latent"""
+        b, _, h, w = image.shape
+        lh = h // self.reduction
+        lw = w // self.reduction
+        N = h * w
+        N_latent = lh * lw
+        K = max(4, int(N * fraction))  # pixels per latent cloud
+
+        # Input tokens (color + pos)
+        pos = self._get_pos(b, h, w)
+        stacked = torch.cat([image, pos], dim=1)
+        input_grid = self.enc_input_proj(stacked)  # [B, D, H, W]
+        input_tokens = input_grid.permute(0, 2, 3, 1).reshape(b, N, self.d_channels)
+
+        # Latent queries (pos only)
+        latent_pos = self._get_pos(b, lh, lw)
+        latent_queries = latent_pos.permute(0, 2, 3, 1).reshape(b, N_latent, -1)
+        latent_queries = self.latent_query_proj(latent_queries)  # [B, N_latent, D]
+
+        # Per-latent-pixel random clouds
+        idx = torch.randint(0, N, (b, N_latent, K), device=image.device)
+
+        kv = torch.gather(
+            input_tokens.unsqueeze(1).expand(-1, N_latent, -1, -1),
+            2,
+            idx.unsqueeze(-1).expand(-1, -1, -1, self.d_channels)
+        )  # [B, N_latent, K, D]
+
+        # Batched MHA
+        Q = latent_queries.view(b * N_latent, 1, self.d_channels)
+        KV = kv.view(b * N_latent, K, self.d_channels)
+
+        attn_out, _ = self.enc_mha(Q, KV, KV, need_weights=False)
+
+        latent = attn_out.view(b, lh, lw, self.d_channels).permute(0, 3, 1, 2).contiguous()
+        return latent
+
+    def decode(self, latent: torch.Tensor, target_h: int, target_w: int, fraction: float = 1.0) -> torch.Tensor:
+        """[B, D, lh, lw] → [B, C, target_h, target_w]"""
+        b, d, lh, lw = latent.shape
+        N_latent = lh * lw
+        N_out = target_h * target_w
+
+        # Latent tokens (color + pos)
+        latent_pos = self._get_pos(b, lh, lw)
+        latent_flat = latent.permute(0, 2, 3, 1).reshape(b, N_latent, d)
+        latent_pos_flat = latent_pos.permute(0, 2, 3, 1).reshape(b, N_latent, -1)
+        latent_tokens = torch.cat([latent_flat, latent_pos_flat], dim=-1)
+        latent_tokens = self.latent_token_proj(latent_tokens)  # [B, N_latent, D]
+
+        # Output pixel queries (pos only)
+        out_pos = self._get_pos(b, target_h, target_w)
+        out_queries = out_pos.permute(0, 2, 3, 1).reshape(b, N_out, -1)
+        out_queries = self.latent_query_proj(out_queries)  # reuse proj
+
+        # Optional subsampling of latent (for testing)
+        if fraction < 1.0:
+            K = max(4, int(N_latent * fraction))
+            idx = torch.randint(0, N_latent, (b, N_out, K), device=latent.device)
+            kv = torch.gather(
+                latent_tokens.unsqueeze(1).expand(-1, N_out, -1, -1),
+                2,
+                idx.unsqueeze(-1).expand(-1, -1, -1, self.d_channels)
+            )
+            KV = kv.view(b * N_out, K, self.d_channels)
+        else:
+            KV = latent_tokens.unsqueeze(1).expand(-1, N_out, -1, -1).reshape(b * N_out, N_latent, self.d_channels)
+
+        Q = out_queries.view(b * N_out, 1, self.d_channels)
+
+        attn_out, _ = self.dec_mha(Q, KV, KV, need_weights=False)
+
+        out = attn_out.view(b, target_h, target_w, self.d_channels).permute(0, 3, 1, 2).contiguous()
+        out = self.dec_out_proj(out)
+        return out
+
+
 # ======================================================================================================================
 
 class RIID(nn.Module):
