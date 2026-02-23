@@ -67,7 +67,7 @@ model = RIID(
     cross_dropout=0.1,
     ffn_dropout=0.2,
 ).to(device)
-train_num_clouds = 4
+train_num_clouds = 2
 
 model.print_model_summary()
 
@@ -373,7 +373,9 @@ for E in range(num_epochs):
         null_text_cond = text_encoder(torch.zeros_like(positive_label))
 
         sizes = [
+            (16, 16, 1, "Half"),
             (32, 32, train_num_clouds, "1:1"),
+            (32, 32, 32, "1:1 noisy"),
             # (24, 40, "foo"),
             # (40, 24, "bar"),
             # (18, 27, "3:2"),
@@ -384,7 +386,7 @@ for E in range(num_epochs):
             # (30, 24, "4:5"),
             # (18, 32, "16:9"),
             # (32, 18, "9:16"),
-            (64, 64, train_num_clouds * 4, "Double Resolution"),
+            (64, 64, train_num_clouds * 4, "Double"),
         ]
 
         for (height, width, num_clouds, name) in sizes:
@@ -406,7 +408,13 @@ for E in range(num_epochs):
                 title=f"{name} - H:{height}, W:{width}"
             )
 
-            del final_x0_hat, final_x
+    del final_x0_hat, final_x, grid_noise, pos_text_cond, null_text_cond
+    torch.cuda.empty_cache()
+
+    import gc
+
+    gc.collect()
+    torch.cuda.reset_peak_memory_stats()
 
     # MODEL SAVING
     if (E + 1) % 1 == 0 or E == num_epochs:
