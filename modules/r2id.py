@@ -2,6 +2,40 @@ import torch
 from torch import nn
 
 
+class ImageNorm(nn.Module):
+    def __init__(self, num_channels: int, affine: bool = False):
+        super().__init__()
+        self.norm = nn.RMSNorm(num_channels, elementwise_affine=affine)
+
+    def forward(self, x):
+        x = torch.movedim(x, -3, -1)
+        x = self.norm(x)
+        x = torch.movedim(x, -1, -3)
+        return x
+
+
+class GRN(nn.Module):
+    """Global Response Normalization from ConvNeXt V2.
+       Global, resolution-invariant, inter-channel competition, no pixel mixing."""
+
+    def __init__(self, dim: int, eps: float = 1e-6):
+        super().__init__()
+        self.eps = eps
+        self.gamma = nn.Parameter(torch.zeros(dim))
+        self.beta = nn.Parameter(torch.zeros(dim))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: [B, C, H, W]
+        # 1. Global L2 response per channel (energy of the whole image per channel)
+        gx = torch.norm(x, p=2, dim=(2, 3), keepdim=True)  # [B, C, 1, 1]
+
+        # 2. Normalize responses across channels (competition)
+        nx = gx / (gx.mean(dim=1, keepdim=True) + self.eps)  # relative strength
+
+        # 3. Apply + learnable calibration + residual
+        return (1.0 + self.gamma.unsqueeze(-1).unsqueeze(-1)) * (x * nx) + self.beta.unsqueeze(-1).unsqueeze(-1) + x
+
+
 class PosEmbed2d(nn.Module):
     def __init__(self, num_high_freq: int, num_low_freq: int, eps: float = 1e-6):
         super().__init__()
@@ -12,7 +46,7 @@ class PosEmbed2d(nn.Module):
         frequencies = torch.pi * (2.0 ** powers)  # [..., pi/4, pi/2, pi, 2pi, 4pi, ...]
         self.register_buffer("frequencies", frequencies, persistent=True)
 
-        self.norm = nn.GroupNorm(1, 4 * self.num_frequencies)
+        # self.norm = GRN(4 * self.num_frequencies)
 
     def _make_grid(self, h: int, w: int, relative: bool):
         if relative:
@@ -65,9 +99,9 @@ class PosEmbed2d(nn.Module):
         cos_ch = cos_feat.permute(0, 1, 4, 2, 3).contiguous().view(batch_size, 2 * self.num_frequencies, h, w)
         fourier_ch = torch.cat([sin_ch, cos_ch], dim=1)  # [b, 4F, h, w]
 
-        positional_embedding = self.norm(fourier_ch)  # [b, 4F, h, w]
+        # positional_embedding = self.norm(fourier_ch)  # [b, 4F, h, w]
 
-        return positional_embedding
+        return fourier_ch
 
 
 class ContTimeEmbed(nn.Module):
@@ -80,7 +114,8 @@ class ContTimeEmbed(nn.Module):
         frequencies = torch.pi * (2.0 ** powers)  # [pi, 2pi, 4pi, ...]
         self.register_buffer("frequencies", frequencies, persistent=True)
 
-        self.norm = nn.LayerNorm(2 * self.num_frequencies)
+        self.norm = nn.LayerNorm(2 * self.num_frequencies, elementwise_affine=False)
+        # self.norm = nn.RMSNorm(2 * self.num_frequencies, elementwise_affine=False)
 
     def forward(self, alpha_bar: torch.Tensor) -> torch.Tensor:
         alpha_mapped = alpha_bar * (1 - 2 * self.eps) - (0.5 - self.eps)
@@ -96,23 +131,41 @@ class ContTimeEmbed(nn.Module):
         return time_vector
 
 
-class FiLM(nn.Module):
+class ImageAdaLN(nn.Module):
     def __init__(self, film_dim: int, out_dim: int):
         super().__init__()
 
-        self.film = nn.Sequential(
+        self.gb = nn.Sequential(
             nn.Linear(film_dim, 2 * out_dim),
         )
 
-        nn.init.normal_(self.film[-1].weight, mean=0.0, std=1e-3)
-        nn.init.zeros_(self.film[-1].bias)
+        nn.init.normal_(self.gb[-1].weight, mean=0.0, std=1e-3)
+        nn.init.zeros_(self.gb[-1].bias)
 
-    def forward(self, time_cond):
-        gb = self.film(time_cond)
+        self.norm = GRN(out_dim)
+
+    def forward(self, x, time_cond):
+        gb = self.gb(time_cond)
         gamma, beta = gb.chunk(2, dim=-1)
         gamma = 1.0 + gamma
 
-        return gamma, beta
+        x = self.norm(x) * gamma.unsqueeze(-1).unsqueeze(-1) + beta.unsqueeze(-1).unsqueeze(-1)
+
+        return x
+
+
+class ImageFFN(nn.Module):
+    def __init__(self, d_channels: int, dropout: float = 0.0):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv2d(d_channels, 4 * d_channels, 1),
+            nn.SiLU(),
+            nn.Dropout(dropout),
+            nn.Conv2d(4 * d_channels, d_channels, 1)
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x)
 
 
 class CrossAttention(nn.Module):
@@ -191,8 +244,7 @@ class EncBlock(nn.Module):
         super().__init__()
         self.d_channels = d_channels
 
-        self.cloud_norm = nn.GroupNorm(num_heads, d_channels)
-        self.cloud_film = FiLM(film_dim, d_channels)
+        self.cloud_ada = ImageAdaLN(film_dim, d_channels)
         self.cloud_attn = CloudAttention(
             d_channels=d_channels,
             num_heads=num_heads,
@@ -200,14 +252,8 @@ class EncBlock(nn.Module):
         )
         self.cloud_scalar = nn.Parameter(torch.ones(d_channels))
 
-        self.ffn_norm = nn.GroupNorm(1, d_channels)
-        self.ffn_film = FiLM(film_dim, d_channels)
-        self.ffn = nn.Sequential(
-            nn.Conv2d(d_channels, 4 * d_channels, 1),
-            nn.SiLU(),
-            nn.Dropout(ffn_dropout),
-            nn.Conv2d(4 * d_channels, d_channels, 1)
-        )
+        self.ffn_ada = ImageAdaLN(film_dim, d_channels)
+        self.ffn = ImageFFN(d_channels, ffn_dropout)
         self.ffn_scalar = nn.Parameter(torch.ones(d_channels))
 
         self.final_scalar = nn.Parameter(torch.ones(d_channels) * 0.1)
@@ -215,17 +261,13 @@ class EncBlock(nn.Module):
     def forward(self, image, film_vector, num_clouds: int):
         working_image = image
 
-        cloud_norm = self.cloud_norm(working_image)
-        cloud_g, cloud_b = self.cloud_film(film_vector)
-        cloud_filmed = cloud_norm * cloud_g.unsqueeze(-1).unsqueeze(-1) + cloud_b.unsqueeze(-1).unsqueeze(-1)
-        cloud_out = self.cloud_attn(cloud_filmed, num_clouds)
+        cloud_adad = self.cloud_ada(working_image, film_vector)
+        cloud_out = self.cloud_attn(cloud_adad, num_clouds)
 
         working_image = working_image + cloud_out * self.cloud_scalar.view(1, self.d_channels, 1, 1)
 
-        ffn_norm = self.ffn_norm(working_image)
-        ffn_g, ffn_b = self.ffn_film(film_vector)
-        ffn_filmed = ffn_norm * ffn_g.unsqueeze(-1).unsqueeze(-1) + ffn_b.unsqueeze(-1).unsqueeze(-1)
-        ffn_out = self.ffn(ffn_filmed)
+        ffn_adad = self.ffn_ada(working_image, film_vector)
+        ffn_out = self.ffn(ffn_adad)
 
         working_image = working_image + ffn_out * self.ffn_scalar.view(1, self.d_channels, 1, 1)
 
@@ -247,8 +289,7 @@ class DecBlock(nn.Module):
         super().__init__()
         self.d_channels = d_channels
 
-        self.cloud_norm = nn.GroupNorm(num_heads, d_channels)
-        self.cloud_film = FiLM(film_dim, d_channels)
+        self.cloud_ada = ImageAdaLN(film_dim, d_channels)
         self.cloud_attn = CloudAttention(
             d_channels=d_channels,
             num_heads=num_heads,
@@ -256,8 +297,7 @@ class DecBlock(nn.Module):
         )
         self.cloud_scalar = nn.Parameter(torch.ones(d_channels))
 
-        self.cross_norm = nn.GroupNorm(num_heads, d_channels)
-        self.cross_film = FiLM(film_dim, d_channels)
+        self.cross_ada = ImageAdaLN(film_dim, d_channels)
         self.cross_attn = CrossAttention(
             d_channels=d_channels,
             num_heads=num_heads,
@@ -265,14 +305,8 @@ class DecBlock(nn.Module):
         )
         self.cross_scalar = nn.Parameter(torch.ones(d_channels))
 
-        self.ffn_norm = nn.GroupNorm(1, d_channels)
-        self.ffn_film = FiLM(film_dim, d_channels)
-        self.ffn = nn.Sequential(
-            nn.Conv2d(d_channels, 4 * d_channels, 1),
-            nn.SiLU(),
-            nn.Dropout(ffn_dropout),
-            nn.Conv2d(4 * d_channels, d_channels, 1)
-        )
+        self.ffn_ada = ImageAdaLN(film_dim, d_channels)
+        self.ffn = ImageFFN(d_channels, ffn_dropout)
         self.ffn_scalar = nn.Parameter(torch.ones(d_channels))
 
         self.final_scalar = nn.Parameter(torch.ones(d_channels) * 0.1)
@@ -280,24 +314,18 @@ class DecBlock(nn.Module):
     def forward(self, image, film_vector, text_tokens, num_clouds):
         working_image = image
 
-        cloud_norm = self.cloud_norm(working_image)
-        cloud_g, cloud_b = self.cloud_film(film_vector)
-        cloud_filmed = cloud_norm * cloud_g.unsqueeze(-1).unsqueeze(-1) + cloud_b.unsqueeze(-1).unsqueeze(-1)
-        cloud_out = self.cloud_attn(cloud_filmed, num_clouds)
+        cloud_adad = self.cloud_ada(working_image, film_vector)
+        cloud_out = self.cloud_attn(cloud_adad, num_clouds)
 
         working_image = working_image + cloud_out * self.cloud_scalar.view(1, self.d_channels, 1, 1)
 
-        cross_norm = self.cross_norm(working_image)
-        cross_g, cross_b = self.cross_film(film_vector)
-        cross_filmed = cross_norm * cross_g.unsqueeze(-1).unsqueeze(-1) + cross_b.unsqueeze(-1).unsqueeze(-1)
-        cross_out = self.cross_attn(cross_filmed, text_tokens)
+        cross_adad = self.cross_ada(working_image, film_vector)
+        cross_out = self.cross_attn(cross_adad, text_tokens)
 
         working_image = working_image + cross_out * self.cross_scalar.view(1, self.d_channels, 1, 1)
 
-        ffn_norm = self.ffn_norm(working_image)
-        ffn_g, ffn_b = self.ffn_film(film_vector)
-        ffn_filmed = ffn_norm * ffn_g.unsqueeze(-1).unsqueeze(-1) + ffn_b.unsqueeze(-1).unsqueeze(-1)
-        ffn_out = self.ffn(ffn_filmed)
+        ffn_adad = self.ffn_ada(working_image, film_vector)
+        ffn_out = self.ffn(ffn_adad)
 
         working_image = working_image + ffn_out * self.ffn_scalar.view(1, self.d_channels, 1, 1)
 
@@ -335,6 +363,7 @@ class RIID(nn.Module):
         self.num_time_frequencies = int(time_low_freq + time_high_freq)
         self.film_dim = int(film_dim)
 
+        self.pre_norm = GRN(self.num_pos_frequencies * 4 * 2 + c_channels)
         self.proj_to_latent = nn.Conv2d(self.num_pos_frequencies * 4 * 2 + c_channels, d_channels, 1)
         self.latent_to_epsilon = nn.Conv2d(d_channels, c_channels, 1)
         nn.init.zeros_(self.latent_to_epsilon.weight)
@@ -395,7 +424,7 @@ class RIID(nn.Module):
         pos_map = torch.cat([rel_pos_map, abs_pos_map], dim=-3)
 
         stacked_latent = torch.cat([image, pos_map], dim=-3)
-        latent = self.proj_to_latent(stacked_latent)
+        latent = self.proj_to_latent(self.pre_norm(stacked_latent))
 
         for i, enc_block in enumerate(self.enc_blocks):
             latent = enc_block(latent, film_vector, num_clouds)
