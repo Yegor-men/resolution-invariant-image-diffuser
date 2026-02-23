@@ -143,10 +143,9 @@ class CrossAttention(nn.Module):
 
 
 class CloudAttention(nn.Module):
-    def __init__(self, d_channels: int, num_heads: int, num_groups: int, dropout: float = 0.0):
+    def __init__(self, d_channels: int, num_heads: int, dropout: float = 0.0):
         super().__init__()
         assert d_channels % num_heads == 0, f"d_channels ({d_channels}) must be divisible by num_heads ({num_heads})"
-        self.num_groups = num_groups
         self.mha = nn.MultiheadAttention(
             embed_dim=d_channels,
             num_heads=num_heads,
@@ -154,7 +153,7 @@ class CloudAttention(nn.Module):
             dropout=dropout,
         )
 
-    def forward(self, image):
+    def forward(self, image, num_clouds: int = 1):
         b, d, h, w = image.shape
         total_pixels = h * w
 
@@ -164,12 +163,12 @@ class CloudAttention(nn.Module):
         x_flat = image.view(b, d, total_pixels)
         x_shuffled = x_flat[:, :, perm]
 
-        group_size = total_pixels // self.num_groups
-        x_groups = x_shuffled.permute(0, 2, 1).contiguous().view(b * self.num_groups, group_size, d)
+        group_size = total_pixels // num_clouds
+        x_groups = x_shuffled.permute(0, 2, 1).contiguous().view(b * num_clouds, group_size, d)
 
         attn_out, _ = self.mha(x_groups, x_groups, x_groups, need_weights=False)
 
-        attn_out = attn_out.view(b, self.num_groups, group_size, d).permute(0, 3, 1, 2).contiguous()
+        attn_out = attn_out.view(b, num_clouds, group_size, d).permute(0, 3, 1, 2).contiguous()
         attn_out = attn_out.view(b, d, total_pixels)
 
         attn_out = attn_out[:, :, inv_perm]
@@ -186,7 +185,6 @@ class EncBlock(nn.Module):
             d_channels: int,
             num_heads: int,
             film_dim: int,
-            cloud_groups: int,
             cloud_dropout: float = 0.0,
             ffn_dropout: float = 0.0,
     ):
@@ -198,7 +196,6 @@ class EncBlock(nn.Module):
         self.cloud_attn = CloudAttention(
             d_channels=d_channels,
             num_heads=num_heads,
-            num_groups=cloud_groups,
             dropout=cloud_dropout,
         )
         self.cloud_scalar = nn.Parameter(torch.ones(d_channels))
@@ -215,13 +212,13 @@ class EncBlock(nn.Module):
 
         self.final_scalar = nn.Parameter(torch.ones(d_channels) * 0.1)
 
-    def forward(self, image, film_vector):
+    def forward(self, image, film_vector, num_clouds: int):
         working_image = image
 
         cloud_norm = self.cloud_norm(working_image)
         cloud_g, cloud_b = self.cloud_film(film_vector)
         cloud_filmed = cloud_norm * cloud_g.unsqueeze(-1).unsqueeze(-1) + cloud_b.unsqueeze(-1).unsqueeze(-1)
-        cloud_out = self.cloud_attn(cloud_filmed)
+        cloud_out = self.cloud_attn(cloud_filmed, num_clouds)
 
         working_image = working_image + cloud_out * self.cloud_scalar.view(1, self.d_channels, 1, 1)
 
@@ -243,7 +240,6 @@ class DecBlock(nn.Module):
             d_channels: int,
             num_heads: int,
             film_dim: int,
-            cloud_groups: int,
             cloud_dropout: float = 0.0,
             cross_dropout: float = 0.0,
             ffn_dropout: float = 0.0,
@@ -256,7 +252,6 @@ class DecBlock(nn.Module):
         self.cloud_attn = CloudAttention(
             d_channels=d_channels,
             num_heads=num_heads,
-            num_groups=cloud_groups,
             dropout=cloud_dropout,
         )
         self.cloud_scalar = nn.Parameter(torch.ones(d_channels))
@@ -282,15 +277,15 @@ class DecBlock(nn.Module):
 
         self.final_scalar = nn.Parameter(torch.ones(d_channels) * 0.1)
 
-    def forward(self, image, film_vector, text_tokens):
+    def forward(self, image, film_vector, text_tokens, num_clouds):
         working_image = image
 
         cloud_norm = self.cloud_norm(working_image)
         cloud_g, cloud_b = self.cloud_film(film_vector)
         cloud_filmed = cloud_norm * cloud_g.unsqueeze(-1).unsqueeze(-1) + cloud_b.unsqueeze(-1).unsqueeze(-1)
-        axial_out = self.cloud_attn(cloud_filmed)
+        cloud_out = self.cloud_attn(cloud_filmed, num_clouds)
 
-        working_image = working_image + axial_out * self.cloud_scalar.view(1, self.d_channels, 1, 1)
+        working_image = working_image + cloud_out * self.cloud_scalar.view(1, self.d_channels, 1, 1)
 
         cross_norm = self.cross_norm(working_image)
         cross_g, cross_b = self.cross_film(film_vector)
@@ -329,7 +324,6 @@ class RIID(nn.Module):
             cloud_dropout: float = 0.0,
             cross_dropout: float = 0.0,
             ffn_dropout: float = 0.0,
-            cloud_groups: int = 4,
     ):
         super().__init__()
         self.c_channels = int(c_channels)
@@ -340,7 +334,6 @@ class RIID(nn.Module):
         self.num_pos_frequencies = int(pos_low_freq + pos_high_freq)
         self.num_time_frequencies = int(time_low_freq + time_high_freq)
         self.film_dim = int(film_dim)
-        self.cloud_groups = int(cloud_groups)
 
         self.proj_to_latent = nn.Conv2d(self.num_pos_frequencies * 4 * 2 + c_channels, d_channels, 1)
         self.latent_to_epsilon = nn.Conv2d(d_channels, c_channels, 1)
@@ -361,7 +354,6 @@ class RIID(nn.Module):
                 d_channels=d_channels,
                 num_heads=num_heads,
                 film_dim=film_dim,
-                cloud_groups=cloud_groups,
                 cloud_dropout=cloud_dropout,
                 ffn_dropout=ffn_dropout,
             ) for _ in range(enc_blocks)
@@ -372,7 +364,6 @@ class RIID(nn.Module):
                 d_channels=d_channels,
                 num_heads=num_heads,
                 film_dim=film_dim,
-                cloud_groups=cloud_groups,
                 cloud_dropout=cloud_dropout,
                 ffn_dropout=ffn_dropout,
                 cross_dropout=cross_dropout,
@@ -389,10 +380,10 @@ class RIID(nn.Module):
 
         print(f"Channels for color/positioning: {total_col_channels}/{total_pos_channels}, total: {total_channels}")
 
-    def forward(self, image: torch.Tensor, alpha_bar: torch.Tensor, text_conds: list[torch.Tensor]):
+    def forward(self, image: torch.Tensor, alpha_bar: torch.Tensor, text_conds: list[torch.Tensor], num_clouds=1):
         assert image.ndim == 4, "Image must be batch, tensor shape of [B, C, H, W]"
         b, c, h, w = image.shape
-        assert h * w % self.cloud_groups == 0, f"Number of pixels in the image must be divisible by {self.cloud_groups}"
+        assert h * w % num_clouds == 0, f"Number of pixels in the image must be divisible by {num_clouds}"
 
         epsilon_list = []
 
@@ -407,12 +398,12 @@ class RIID(nn.Module):
         latent = self.proj_to_latent(stacked_latent)
 
         for i, enc_block in enumerate(self.enc_blocks):
-            latent = enc_block(latent, film_vector)
+            latent = enc_block(latent, film_vector, num_clouds)
 
         for token_sequence in text_conds:
             lat = latent
             for i, dec_block in enumerate(self.dec_blocks):
-                lat = dec_block(lat, film_vector, token_sequence)
+                lat = dec_block(lat, film_vector, token_sequence, num_clouds)
             eps = self.latent_to_epsilon(lat)
             epsilon_list.append(eps)
 

@@ -55,8 +55,8 @@ from modules.dummy_textencoder import DummyTextCond
 model = RIID(
     c_channels=1,
     d_channels=128,
-    enc_blocks=8,
-    dec_blocks=8,
+    enc_blocks=10,
+    dec_blocks=2,
     num_heads=8,
     pos_high_freq=8,
     pos_low_freq=3,
@@ -66,8 +66,8 @@ model = RIID(
     cloud_dropout=0.1,
     cross_dropout=0.1,
     ffn_dropout=0.2,
-    cloud_groups=8,
 ).to(device)
+train_num_clouds = 32
 
 model.print_model_summary()
 
@@ -120,7 +120,7 @@ def make_cosine_with_warmup(optimizer, warmup_steps, total_steps, lr_end):
 
 
 num_epochs = 20
-batch_size = 25
+batch_size = 50
 ema_decay = 0.9995
 
 train_dloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
@@ -332,7 +332,7 @@ for E in range(num_epochs):
             null_cond = text_encoder(torch.zeros_like(label)).to(device)
             cond_list = [pos_cond, null_cond]
 
-            predicted_eps_list = model(noisy_image, alpha_bar, cond_list)
+            predicted_eps_list = model(noisy_image, alpha_bar, cond_list, train_num_clouds)
             eps_pos, eps_null = predicted_eps_list[0], predicted_eps_list[1]
 
             null_loss = nn.functional.mse_loss(eps_null, eps)
@@ -373,7 +373,7 @@ for E in range(num_epochs):
         null_text_cond = text_encoder(torch.zeros_like(positive_label))
 
         sizes = [
-            (32, 32, "1:1"),
+            (32, 32, train_num_clouds, "1:1"),
             # (24, 40, "foo"),
             # (40, 24, "bar"),
             # (18, 27, "3:2"),
@@ -384,14 +384,15 @@ for E in range(num_epochs):
             # (30, 24, "4:5"),
             # (18, 32, "16:9"),
             # (32, 18, "9:16"),
-            (64, 64, "Double Resolution"),
+            (64, 64, train_num_clouds * 4, "Double Resolution"),
         ]
 
-        for (height, width, name) in sizes:
+        for (height, width, num_clouds, name) in sizes:
             grid_noise = torch.randn(100, 1, height, width).to(device)
 
             final_x0_hat, final_x = run_ddim_visualization(
-                model=ema_model,
+                model=model,
+                num_clouds=num_clouds,
                 initial_noise=grid_noise,
                 pos_text_cond=pos_text_cond,
                 null_text_cond=null_text_cond,
