@@ -12,7 +12,7 @@ model = RIID(
     c_channels=1,
     d_channels=128,
     enc_blocks=8,
-    dec_blocks=4,
+    dec_blocks=8,
     num_heads=8,
     pos_high_freq=8,
     pos_low_freq=3,
@@ -31,8 +31,8 @@ text_encoder = DummyTextCond(
 
 from save_load_model import load_checkpoint_into
 
-model = load_checkpoint_into(model, "models/E20_0.05264_diffusion_20260224_070413.pt", "cuda")
-text_encoder = load_checkpoint_into(text_encoder, "models/E20_0.05264_text_embedding_20260224_070413.pt")
+model = load_checkpoint_into(model, "models/E20_0.04429_diffusion_20260224_161134.pt", "cuda")
+text_encoder = load_checkpoint_into(text_encoder, "models/E20_0.04429_text_embedding_20260224_161135.pt")
 
 model.to(device)
 model.eval()
@@ -87,9 +87,9 @@ with torch.no_grad():
             null_text_cond=null_text_cond,
             alpha_bar_fn=alpha_bar_cosine,
             render_image_fn=render_image,
-            num_steps=100,
-            cfg_scale=4.0,  # change to 1.0 for sdxl
-            eta=2.0,  # change to 1.0 for sdxl
+            num_steps=20,  # 20 for double res bc i'm lazy and its slow, 100 for others
+            cfg_scale=4.0,
+            eta=2.0,
             render_every=1000,
             device=torch.device("cuda"),
             title=f"{name} - H:{height}, W:{width}"
