@@ -384,6 +384,12 @@ class RIAE(nn.Module):
             embed_dim=embed_dim, num_heads=num_heads, batch_first=True, dropout=dropout
         )
 
+    def print_model_summary(self):
+        total = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        print(f"Trainable parameters: {total:,}")
+
+        print(f"emb_dim: {self.embed_dim} | pos: {self.pos_dim * 4} | col/lat: {self.col_channels}/{self.lat_channels}")
+
     def _get_pos(self, b: int, h: int, w: int):
         rel = self.pos_embed(b, h, w, relative=True)
         abs = self.pos_embed(b, h, w, relative=False)

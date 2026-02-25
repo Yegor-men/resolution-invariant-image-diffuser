@@ -45,7 +45,7 @@ class OneHotMNIST(torch.utils.data.Dataset):
 train_dataset = OneHotMNIST(train=True)
 test_dataset = OneHotMNIST(train=False)
 num_epochs = 20
-batch_size = 40
+batch_size = 25
 ema_decay = 0.9995
 train_dloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 test_dloader = DataLoader(test_dataset, batch_size=batch_size, shuffle=True)
@@ -58,8 +58,8 @@ print(f"Cuda is available: {torch.cuda.is_available()}")
 
 model = RIAE(
     col_channels=1,
-    lat_channels=40,
-    embed_dim=128,
+    lat_channels=64,
+    embed_dim=256,
     reduction=4,
     pos_high_freq=8,
     pos_low_freq=3,
@@ -67,9 +67,11 @@ model = RIAE(
     dropout=0.1,
 ).to(device)
 
+model.print_model_summary()
+
 # from save_load_model import load_checkpoint_into
 #
-# model = load_checkpoint_into(model, "models/E19_0.09707_autoencoder_20260225_211356.pt", "cuda")
+# model = load_checkpoint_into(model, "models/E20_0.05237_autoencoder_20260226_005648.pt", "cuda")
 
 import copy
 
@@ -111,8 +113,8 @@ def make_cosine_with_warmup(optimizer, warmup_steps, total_steps, lr_end):
     return LambdaLR(optimizer, lr_lambda, -1)
 
 
-peak_lr = 1e-5
-final_lr = 1e-6
+peak_lr = 1e-3
+final_lr = 1e-5
 total_steps = num_epochs * len(train_dloader)
 warmup_steps = len(train_dloader)
 
@@ -132,7 +134,7 @@ from tqdm import tqdm
 
 train_loss_sums = []
 test_loss_sums = []
-enc_frac = 0.5
+enc_frac = 1 / 16
 train_losses = []
 
 for E in range(num_epochs):
