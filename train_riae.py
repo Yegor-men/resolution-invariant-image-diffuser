@@ -45,7 +45,7 @@ class OneHotMNIST(torch.utils.data.Dataset):
 train_dataset = OneHotMNIST(train=True)
 test_dataset = OneHotMNIST(train=False)
 num_epochs = 20
-batch_size = 25
+batch_size = 40
 ema_decay = 0.9995
 train_dloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 test_dloader = DataLoader(test_dataset, batch_size=batch_size, shuffle=True)
@@ -107,7 +107,7 @@ def make_cosine_with_warmup(optimizer, warmup_steps, total_steps, lr_end):
     return LambdaLR(optimizer, lr_lambda, -1)
 
 
-peak_lr = 1e-4
+peak_lr = 1e-5
 final_lr = 1e-6
 total_steps = num_epochs * len(train_dloader)
 warmup_steps = len(train_dloader)
@@ -115,20 +115,29 @@ warmup_steps = len(train_dloader)
 optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
 scheduler = make_cosine_with_warmup(optimizer, warmup_steps, total_steps, final_lr)
 
+
+def invert_image(image):
+    return (image - 0.5) * 2.0
+
+
+def uninvert_image(image):
+    return (image / 2.0) + 0.5
+
+
 from tqdm import tqdm
 
 train_loss_sums = []
 test_loss_sums = []
-
+enc_frac = 0.5
 train_losses = []
 
 for e in range(num_epochs):
     model.train()
     train_loss_sum = 0.0
     for i, (image, label) in tqdm(enumerate(train_dloader), total=len(train_dloader), desc=f"TRAIN - E{e}"):
-        image, label = image.to(device), label.to(device)
+        image, label = invert_image(image).to(device), label.to(device)
 
-        lat_img = model.encode(image)
+        lat_img = model.encode(image, fraction=enc_frac)
         recon_img = model.decode(lat_img)
 
         loss = torch.nn.functional.mse_loss(recon_img, image)
@@ -152,14 +161,14 @@ for e in range(num_epochs):
     test_loss_sum = 0.0
     for i, (image, label) in tqdm(enumerate(test_dloader), total=len(test_dloader), desc=f"TEST - E{e}"):
         with torch.no_grad():
-            image, label = image.to(device), label.to(device)
-            lat_img = ema_model.encode(image)
+            image, label = invert_image(image).to(device), label.to(device)
+            lat_img = ema_model.encode(image, fraction=enc_frac)
             recon_img = ema_model.decode(lat_img)
             loss = torch.nn.functional.mse_loss(recon_img, image)
-            test_loss_sum += loss
+            test_loss_sum += loss.item()
             if i == 0:
-                render_image(image)
-                render_image(recon_img, f"LOSS: {loss}")
+                render_image(uninvert_image(image))
+                render_image(uninvert_image(recon_img), f"LOSS: {loss}")
     test_loss_sum /= len(test_dloader)
     test_loss_sums.append(test_loss_sum)
 
