@@ -334,71 +334,88 @@ class DecBlock(nn.Module):
         return final_image
 
 
+# ======================================================================================================================
+
 class RIAE(nn.Module):
     def __init__(
             self,
-            c_channels: int = 1,  # 1 for MNIST
-            d_channels: int = 128,  # match your RIID latent dim
-            reduction: int = 4,  # 32 → 8 for MNIST POC
+            col_channels: int = 1,
+            lat_channels: int = 16,
+            embed_dim: int = 128,
+            reduction: int = 4,
             pos_high_freq: int = 8,
             pos_low_freq: int = 3,
-            num_heads: int = 8,
+            num_heads: int = 1,
             dropout: float = 0.1,
     ):
         super().__init__()
-        self.c_channels = c_channels
-        self.d_channels = d_channels
+        self.col_channels = col_channels
+        self.lat_channels = lat_channels
+        self.embed_dim = embed_dim
         self.reduction = reduction
         self.pos_dim = 4 * (pos_high_freq + pos_low_freq)  # same calculation as RIID
 
         self.pos_embed = PosEmbed2d(pos_high_freq, pos_low_freq)
 
-        # Project input (color + pos) → latent dim
-        self.enc_input_proj = nn.Conv2d(c_channels + self.pos_dim * 2, d_channels, 1)
+        # col_c + pos -> embed dim
+        self.enc_in_proj = nn.Conv2d(col_channels + self.pos_dim * 2, embed_dim, 1)
 
-        # Project latent pos → query dim for encoder
-        self.latent_query_proj = nn.Linear(self.pos_dim * 2, d_channels)
+        # pos -> embed_dim
+        self.pos_to_embed_proj = nn.Conv2d(self.pos_dim * 2, embed_dim, 1)
 
-        # Project latent (color + pos) → key/value dim for decoder
-        self.latent_token_proj = nn.Linear(d_channels + self.pos_dim * 2, d_channels)
+        # lat_c + pos -> embed dim
+        self.latent_to_embed_proj = nn.Conv2d(lat_channels + self.pos_dim * 2, embed_dim, 1)
 
-        # Output head
-        self.dec_out_proj = nn.Conv2d(d_channels, c_channels, 1)
+        # output head for encoding (to pure lat_channels colors)
+        self.enc_out_proj = nn.Conv2d(embed_dim, lat_channels, 1)
+        nn.init.zeros_(self.enc_out_proj.weight)
+        nn.init.zeros_(self.enc_out_proj.bias)
+
+        # Output head for decoding (to col_channels colors)
+        self.dec_out_proj = nn.Conv2d(embed_dim, col_channels, 1)
         nn.init.zeros_(self.dec_out_proj.weight)
         nn.init.zeros_(self.dec_out_proj.bias)
 
-        # Cross-attention (pure transfer)
+        # Cross-attention (pure transfer, matching CrossAttention style)
         self.enc_mha = nn.MultiheadAttention(
-            embed_dim=d_channels, num_heads=num_heads, batch_first=True, dropout=dropout
+            embed_dim=embed_dim, num_heads=num_heads, batch_first=True, dropout=dropout
         )
         self.dec_mha = nn.MultiheadAttention(
-            embed_dim=d_channels, num_heads=num_heads, batch_first=True, dropout=dropout
+            embed_dim=embed_dim, num_heads=num_heads, batch_first=True, dropout=dropout
         )
 
     def _get_pos(self, b: int, h: int, w: int):
         rel = self.pos_embed(b, h, w, relative=True)
-        abs_ = self.pos_embed(b, h, w, relative=False)
-        return torch.cat([rel, abs_], dim=1)  # [B, 2*pos_dim, H, W]
+        abs = self.pos_embed(b, h, w, relative=False)
+        return torch.cat([rel, abs], dim=1)  # [B, 2*pos_dim, H, W]
 
-    def encode(self, image: torch.Tensor, fraction: float = 1 / 16.0) -> torch.Tensor:
-        """[B, C, H, W] → [B, D, lh, lw] pure latent"""
+    def encode(self, image, height: int = None, width: int = None, fraction: float = None):
+        """[B, C, H, W] → [B, lat_channels, lh, lw] pure latent colors"""
         b, _, h, w = image.shape
-        lh = h // self.reduction
-        lw = w // self.reduction
+        if height is None or width is None:
+            assert h % self.reduction == 0, f"Image height must be divisible by {self.reduction}"
+            assert w % self.reduction == 0, f"Image width must be divisible by {self.reduction}"
+            height = h // self.reduction
+            width = w // self.reduction
+        lh, lw = height, width
+
+        if fraction is None:
+            fraction = 1 / (self.reduction ** 2)
+
         N = h * w
         N_latent = lh * lw
         K = max(4, int(N * fraction))  # pixels per latent cloud
 
-        # Input tokens (color + pos)
+        # Input tokens (color + pos → embed_dim)
         pos = self._get_pos(b, h, w)
         stacked = torch.cat([image, pos], dim=1)
-        input_grid = self.enc_input_proj(stacked)  # [B, D, H, W]
-        input_tokens = input_grid.permute(0, 2, 3, 1).reshape(b, N, self.d_channels)
+        input_grid = self.enc_in_proj(stacked)  # [B, embed_dim, H, W]
+        input_tokens = input_grid.permute(0, 2, 3, 1).reshape(b, N, self.embed_dim)
 
-        # Latent queries (pos only)
+        # Latent queries (pos only → embed_dim)
         latent_pos = self._get_pos(b, lh, lw)
-        latent_queries = latent_pos.permute(0, 2, 3, 1).reshape(b, N_latent, -1)
-        latent_queries = self.latent_query_proj(latent_queries)  # [B, N_latent, D]
+        latent_queries = self.pos_to_embed_proj(latent_pos)  # [B, embed_dim, lh, lw]
+        latent_queries = latent_queries.permute(0, 2, 3, 1).reshape(b, N_latent, self.embed_dim)
 
         # Per-latent-pixel random clouds
         idx = torch.randint(0, N, (b, N_latent, K), device=image.device)
@@ -406,35 +423,40 @@ class RIAE(nn.Module):
         kv = torch.gather(
             input_tokens.unsqueeze(1).expand(-1, N_latent, -1, -1),
             2,
-            idx.unsqueeze(-1).expand(-1, -1, -1, self.d_channels)
-        )  # [B, N_latent, K, D]
+            idx.unsqueeze(-1).expand(-1, -1, -1, self.embed_dim)
+        )  # [B, N_latent, K, embed_dim]
 
         # Batched MHA
-        Q = latent_queries.view(b * N_latent, 1, self.d_channels)
-        KV = kv.view(b * N_latent, K, self.d_channels)
+        Q = latent_queries.view(b * N_latent, 1, self.embed_dim)
+        KV = kv.view(b * N_latent, K, self.embed_dim)
 
         attn_out, _ = self.enc_mha(Q, KV, KV, need_weights=False)
 
-        latent = attn_out.view(b, lh, lw, self.d_channels).permute(0, 3, 1, 2).contiguous()
+        latent = attn_out.view(b, lh, lw, self.embed_dim).permute(0, 3, 1, 2).contiguous()
+        latent = self.enc_out_proj(latent)  # to pure lat_channels
         return latent
 
-    def decode(self, latent: torch.Tensor, target_h: int, target_w: int, fraction: float = 1.0) -> torch.Tensor:
-        """[B, D, lh, lw] → [B, C, target_h, target_w]"""
+    def decode(self, latent, height: int = None, width: int = None, fraction: float = 1.0):
         b, d, lh, lw = latent.shape
+        if height is None or width is None:
+            target_h = lh * self.reduction
+            target_w = lw * self.reduction
+        else:
+            target_h = height
+            target_w = width
         N_latent = lh * lw
         N_out = target_h * target_w
 
-        # Latent tokens (color + pos)
+        # Latent tokens (color + pos → embed_dim)
         latent_pos = self._get_pos(b, lh, lw)
-        latent_flat = latent.permute(0, 2, 3, 1).reshape(b, N_latent, d)
-        latent_pos_flat = latent_pos.permute(0, 2, 3, 1).reshape(b, N_latent, -1)
-        latent_tokens = torch.cat([latent_flat, latent_pos_flat], dim=-1)
-        latent_tokens = self.latent_token_proj(latent_tokens)  # [B, N_latent, D]
+        stacked = torch.cat([latent, latent_pos], dim=1)
+        latent_grid = self.latent_to_embed_proj(stacked)  # [B, embed_dim, lh, lw]
+        latent_tokens = latent_grid.permute(0, 2, 3, 1).reshape(b, N_latent, self.embed_dim)
 
-        # Output pixel queries (pos only)
+        # Output pixel queries (pos only → embed_dim)
         out_pos = self._get_pos(b, target_h, target_w)
-        out_queries = out_pos.permute(0, 2, 3, 1).reshape(b, N_out, -1)
-        out_queries = self.latent_query_proj(out_queries)  # reuse proj
+        out_queries = self.pos_to_embed_proj(out_pos)  # [B, embed_dim, target_h, target_w]
+        out_queries = out_queries.permute(0, 2, 3, 1).reshape(b, N_out, self.embed_dim)
 
         # Optional subsampling of latent (for testing)
         if fraction < 1.0:
@@ -443,18 +465,18 @@ class RIAE(nn.Module):
             kv = torch.gather(
                 latent_tokens.unsqueeze(1).expand(-1, N_out, -1, -1),
                 2,
-                idx.unsqueeze(-1).expand(-1, -1, -1, self.d_channels)
+                idx.unsqueeze(-1).expand(-1, -1, -1, self.embed_dim)
             )
-            KV = kv.view(b * N_out, K, self.d_channels)
+            KV = kv.view(b * N_out, K, self.embed_dim)
         else:
-            KV = latent_tokens.unsqueeze(1).expand(-1, N_out, -1, -1).reshape(b * N_out, N_latent, self.d_channels)
+            KV = latent_tokens.unsqueeze(1).expand(-1, N_out, -1, -1).reshape(b * N_out, N_latent, self.embed_dim)
 
-        Q = out_queries.view(b * N_out, 1, self.d_channels)
+        Q = out_queries.view(b * N_out, 1, self.embed_dim)
 
         attn_out, _ = self.dec_mha(Q, KV, KV, need_weights=False)
 
-        out = attn_out.view(b, target_h, target_w, self.d_channels).permute(0, 3, 1, 2).contiguous()
-        out = self.dec_out_proj(out)
+        out = attn_out.view(b, target_h, target_w, self.embed_dim).permute(0, 3, 1, 2).contiguous()
+        out = self.dec_out_proj(out)  # to pure col_channels
         return out
 
 
