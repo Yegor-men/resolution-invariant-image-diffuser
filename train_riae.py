@@ -58,7 +58,7 @@ print(f"Cuda is available: {torch.cuda.is_available()}")
 
 model = RIAE(
     col_channels=1,
-    lat_channels=16,
+    lat_channels=40,
     embed_dim=128,
     reduction=4,
     pos_high_freq=8,
@@ -66,6 +66,10 @@ model = RIAE(
     num_heads=8,
     dropout=0.1,
 ).to(device)
+
+# from save_load_model import load_checkpoint_into
+#
+# model = load_checkpoint_into(model, "models/E19_0.09707_autoencoder_20260225_211356.pt", "cuda")
 
 import copy
 
@@ -135,7 +139,9 @@ for E in range(num_epochs):
     model.train()
     train_loss_sum = 0.0
     for i, (image, label) in tqdm(enumerate(train_dloader), total=len(train_dloader), desc=f"TRAIN - E{E}"):
-        image, label = invert_image(image).to(device), label.to(device)
+        image = invert_image(image).to(device)
+
+        model.zero_grad()
 
         lat_img = model.encode(image, fraction=enc_frac)
         recon_img = model.decode(lat_img)
@@ -145,7 +151,7 @@ for E in range(num_epochs):
         train_losses.append(loss.item())
         train_loss_sum += loss.item()
         optimizer.step()
-        model.zero_grad()
+        scheduler.step()
 
         update_ema_model(model, ema_model, ema_decay)
     train_loss_sum /= len(train_dloader)
@@ -161,7 +167,7 @@ for E in range(num_epochs):
     test_loss_sum = 0.0
     for i, (image, label) in tqdm(enumerate(test_dloader), total=len(test_dloader), desc=f"TEST - E{E}"):
         with torch.no_grad():
-            image, label = invert_image(image).to(device), label.to(device)
+            image = invert_image(image).to(device)
             lat_img = ema_model.encode(image, fraction=enc_frac)
             recon_img = ema_model.decode(lat_img)
             loss = torch.nn.functional.mse_loss(recon_img, image)
