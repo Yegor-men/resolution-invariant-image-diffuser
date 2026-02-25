@@ -1,6 +1,9 @@
 import torch
 import time
 
+torch.manual_seed(0)
+torch.cuda.manual_seed(0)
+
 import matplotlib.pyplot as plt
 import torch
 from torch import nn
@@ -71,7 +74,7 @@ model.print_model_summary()
 
 from save_load_model import load_checkpoint_into
 
-model = load_checkpoint_into(model, "models/_E20_0.05237_autoencoder_20260226_005648.pt", "cuda")
+model = load_checkpoint_into(model, "models/E20_0.07765_autoencoder_20260226_071710.pt", "cuda")
 
 
 def invert_image(image):
@@ -85,6 +88,7 @@ def uninvert_image(image):
 from tqdm import tqdm
 
 enc_frac = 1 / 16
+dec_frac = 1.0
 
 model.eval()
 test_loss_sum = 0.0
@@ -92,7 +96,7 @@ for i, (image, label) in tqdm(enumerate(test_dloader), total=len(test_dloader), 
     with torch.no_grad():
         image = invert_image(image).to(device)
         lat_img = model.encode(image, fraction=enc_frac)
-        recon_img = model.decode(lat_img)
+        recon_img = model.decode(lat_img, fraction=dec_frac)
         loss = torch.nn.functional.mse_loss(recon_img, image)
         test_loss_sum += loss.item()
         if i == 0:
@@ -104,7 +108,6 @@ for i, (image, label) in tqdm(enumerate(test_dloader), total=len(test_dloader), 
             B, C, H, W = lat_img_uninverted.shape
 
             fig, axes = plt.subplots(C, B, figsize=(B * 2, C * 2))
-            # fig, axes = plt.subplots(C, B)
 
             for batch_idx in range(B):
                 for channel_idx in range(C):
