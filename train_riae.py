@@ -131,10 +131,10 @@ test_loss_sums = []
 enc_frac = 0.5
 train_losses = []
 
-for e in range(num_epochs):
+for E in range(num_epochs):
     model.train()
     train_loss_sum = 0.0
-    for i, (image, label) in tqdm(enumerate(train_dloader), total=len(train_dloader), desc=f"TRAIN - E{e}"):
+    for i, (image, label) in tqdm(enumerate(train_dloader), total=len(train_dloader), desc=f"TRAIN - E{E}"):
         image, label = invert_image(image).to(device), label.to(device)
 
         lat_img = model.encode(image, fraction=enc_frac)
@@ -159,7 +159,7 @@ for e in range(num_epochs):
     model.eval()
     ema_model.eval()
     test_loss_sum = 0.0
-    for i, (image, label) in tqdm(enumerate(test_dloader), total=len(test_dloader), desc=f"TEST - E{e}"):
+    for i, (image, label) in tqdm(enumerate(test_dloader), total=len(test_dloader), desc=f"TEST - E{E}"):
         with torch.no_grad():
             image, label = invert_image(image).to(device), label.to(device)
             lat_img = ema_model.encode(image, fraction=enc_frac)
@@ -178,3 +178,5 @@ for e in range(num_epochs):
     plt.plot(test_loss_sums, label="test")
     plt.legend()
     plt.show()
+
+    model_path = save_checkpoint(ema_model, prefix=f"E{E + 1}_{test_loss_sum:.5f}_autoencoder")
