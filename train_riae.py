@@ -69,9 +69,9 @@ model = RIAE(
 
 model.print_model_summary()
 
-from save_load_model import load_checkpoint_into
-
-model = load_checkpoint_into(model, "models/_E20_0.05237_autoencoder_20260226_005648.pt", "cuda")
+# from save_load_model import load_checkpoint_into
+#
+# model = load_checkpoint_into(model, "models/_E20_0.04919_autoencoder_20260226_035825.pt", "cuda")
 
 import copy
 
@@ -113,8 +113,8 @@ def make_cosine_with_warmup(optimizer, warmup_steps, total_steps, lr_end):
     return LambdaLR(optimizer, lr_lambda, -1)
 
 
-peak_lr = 1e-4
-final_lr = 1e-6
+peak_lr = 1e-3
+final_lr = 1e-4
 total_steps = num_epochs * len(train_dloader)
 warmup_steps = len(train_dloader)
 
@@ -135,6 +135,7 @@ from tqdm import tqdm
 train_loss_sums = []
 test_loss_sums = []
 enc_frac = 1 / 16
+dec_frac = 1 / 4
 train_losses = []
 
 foo = 0
@@ -147,7 +148,7 @@ for E in range(num_epochs):
         image = invert_image(image).to(device)
 
         lat_img = model.encode(image, fraction=enc_frac)
-        recon_img = model.decode(lat_img)
+        recon_img = model.decode(lat_img, fraction=dec_frac)
 
         loss = torch.nn.functional.mse_loss(recon_img, image) / 2.0
         loss.backward()
@@ -176,7 +177,7 @@ for E in range(num_epochs):
         with torch.no_grad():
             image = invert_image(image).to(device)
             lat_img = ema_model.encode(image, fraction=enc_frac)
-            recon_img = ema_model.decode(lat_img)
+            recon_img = ema_model.decode(lat_img, fraction=dec_frac)
             loss = torch.nn.functional.mse_loss(recon_img, image)
             test_loss_sum += loss.item()
             if i == 0:
