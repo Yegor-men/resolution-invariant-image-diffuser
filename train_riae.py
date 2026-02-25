@@ -69,9 +69,9 @@ model = RIAE(
 
 model.print_model_summary()
 
-# from save_load_model import load_checkpoint_into
-#
-# model = load_checkpoint_into(model, "models/E20_0.05237_autoencoder_20260226_005648.pt", "cuda")
+from save_load_model import load_checkpoint_into
+
+model = load_checkpoint_into(model, "models/_E20_0.05237_autoencoder_20260226_005648.pt", "cuda")
 
 import copy
 
@@ -113,12 +113,12 @@ def make_cosine_with_warmup(optimizer, warmup_steps, total_steps, lr_end):
     return LambdaLR(optimizer, lr_lambda, -1)
 
 
-peak_lr = 1e-3
-final_lr = 1e-5
+peak_lr = 1e-4
+final_lr = 1e-6
 total_steps = num_epochs * len(train_dloader)
 warmup_steps = len(train_dloader)
 
-optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+optimizer = torch.optim.AdamW(model.parameters(), lr=peak_lr)
 scheduler = make_cosine_with_warmup(optimizer, warmup_steps, total_steps, final_lr)
 
 
@@ -137,25 +137,30 @@ test_loss_sums = []
 enc_frac = 1 / 16
 train_losses = []
 
+foo = 0
+
 for E in range(num_epochs):
     model.train()
+    model.zero_grad()
     train_loss_sum = 0.0
     for i, (image, label) in tqdm(enumerate(train_dloader), total=len(train_dloader), desc=f"TRAIN - E{E}"):
         image = invert_image(image).to(device)
 
-        model.zero_grad()
-
         lat_img = model.encode(image, fraction=enc_frac)
         recon_img = model.decode(lat_img)
 
-        loss = torch.nn.functional.mse_loss(recon_img, image)
+        loss = torch.nn.functional.mse_loss(recon_img, image) / 2.0
         loss.backward()
-        train_losses.append(loss.item())
-        train_loss_sum += loss.item()
-        optimizer.step()
-        scheduler.step()
+        foo += 1
+        train_losses.append(loss.item() * 2.0)
+        train_loss_sum += loss.item() * 2.0
 
-        update_ema_model(model, ema_model, ema_decay)
+        if foo % 2 == 0:
+            optimizer.step()
+            scheduler.step()
+            update_ema_model(model, ema_model, ema_decay)
+            model.zero_grad()
+
     train_loss_sum /= len(train_dloader)
     train_loss_sums.append(train_loss_sum)
 

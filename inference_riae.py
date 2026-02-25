@@ -71,7 +71,7 @@ model.print_model_summary()
 
 from save_load_model import load_checkpoint_into
 
-model = load_checkpoint_into(model, "models/E20_0.05237_autoencoder_20260226_005648.pt", "cuda")
+model = load_checkpoint_into(model, "models/_E20_0.05237_autoencoder_20260226_005648.pt", "cuda")
 
 
 def invert_image(image):
