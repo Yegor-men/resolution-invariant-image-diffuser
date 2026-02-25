@@ -95,8 +95,8 @@ test_loss_sum = 0.0
 for i, (image, label) in tqdm(enumerate(test_dloader), total=len(test_dloader), desc="TEST"):
     with torch.no_grad():
         image = invert_image(image).to(device)
-        lat_img = model.encode(image, fraction=enc_frac)
-        recon_img = model.decode(lat_img, fraction=dec_frac)
+        lat_img = model.encode(image, height=2, width=16, fraction=enc_frac)
+        recon_img = model.decode(lat_img, height=32, width=32, fraction=dec_frac)
         loss = torch.nn.functional.mse_loss(recon_img, image)
         test_loss_sum += loss.item()
         if i == 0:
@@ -104,28 +104,28 @@ for i, (image, label) in tqdm(enumerate(test_dloader), total=len(test_dloader), 
             render_image(uninvert_image(recon_img), f"LOSS: {loss}")
 
             # Render latent channels in a grid: rows=channels, columns=batch
-            lat_img_uninverted = uninvert_image(lat_img)
-            B, C, H, W = lat_img_uninverted.shape
-
-            fig, axes = plt.subplots(C, B, figsize=(B * 2, C * 2))
-
-            for batch_idx in range(B):
-                for channel_idx in range(C):
-                    ax = axes[channel_idx, batch_idx] if C > 1 else axes[batch_idx]
-                    channel_img = lat_img_uninverted[batch_idx, channel_idx].cpu()
-                    ax.imshow(channel_img, cmap='gray')
-
-                    # Add labels only on edges to avoid clutter
-                    if channel_idx == 0:
-                        ax.set_title(f"Batch {batch_idx}")
-                    if batch_idx == 0:
-                        ax.set_ylabel(f"Ch {channel_idx}")
-
-                    ax.axis('off')
-
-            plt.suptitle("Latent Representation (Channels × Batch)")
-            plt.tight_layout()
-            plt.show()
+            # lat_img_uninverted = uninvert_image(lat_img)
+            # B, C, H, W = lat_img_uninverted.shape
+            #
+            # fig, axes = plt.subplots(C, B, figsize=(B * 2, C * 2))
+            #
+            # for batch_idx in range(B):
+            #     for channel_idx in range(C):
+            #         ax = axes[channel_idx, batch_idx] if C > 1 else axes[batch_idx]
+            #         channel_img = lat_img_uninverted[batch_idx, channel_idx].cpu()
+            #         ax.imshow(channel_img, cmap='gray')
+            #
+            #         # Add labels only on edges to avoid clutter
+            #         if channel_idx == 0:
+            #             ax.set_title(f"Batch {batch_idx}")
+            #         if batch_idx == 0:
+            #             ax.set_ylabel(f"Ch {channel_idx}")
+            #
+            #         ax.axis('off')
+            #
+            # plt.suptitle("Latent Representation (Channels × Batch)")
+            # plt.tight_layout()
+            # plt.show()
 
 test_loss_sum /= len(test_dloader)
 print(f"LOSS: {test_loss_sum}")
