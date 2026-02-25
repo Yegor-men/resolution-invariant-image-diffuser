@@ -1,35 +1,36 @@
-# R2ID: Resolution Invariant Image Diffuser
+![RIAE-R2ID Banner](media/RIAE_R2ID_banner.png)
 
-R2ID (Resolution Invariant Image Diffuser) is a novel diffusion model architecture designed to address key limitations
-in traditional models such as UNet and DiT. It treats images as continuous functions rather than fixed pixel grids,
-enabling robust generalization to arbitrary resolutions and aspect ratios without artifacts like doubling or squishing.
-The model learns an underlying data function, ignoring pixel density, through dual positional embeddings and Gaussian
-coordinate jitter.
+# RIAE-R2ID: Resolution Invariant Auto Encoder - Resolution Invariant Image Diffuser
 
-This is a proof-of-concept implementation, currently trained on 28x28 MNIST digits (no augmentations) on consumer
-hardware (RTX 5080, ~3 hours for 20 epochs). It generates clean digits at resolutions like 1024x1024 or ratios like 9:
-16, with ~6.1M parameters. Future plans include scaling to datasets like CelebA and refinements for efficiency.
-Note: The code is in an early, messy state (e.g., unclean train/infer scripts, .pt checkpoints instead of .safetensors).
-Focus is on stabilizing the architecture first. Expect major refactors soon. Use at your own risk for now, but feel free
-to experiment or contribute.
+RIAE (Resolution Invariant Auto Encoder)  and R2ID (Resolution Invariant Image Diffuser) are a novel pair of
+architectures for diffusion, designed to address key limitations in traditional models such as UNet and DiT. They treat
+images as continuous functions rather than fixed pixel grids, enabling robust generalization to arbitrary resolutions
+and aspect ratios without artifacts like doubling or squishing. The model learns an underlying data function, ignoring
+pixel density, through dual positional embeddings and Gaussian coordinate jitter.
+
+This is a proof-of-concept implementation, trained on unaugmented 32x32 MNIST digits on consumer hardware.
 
 ## Features
 
-- **Resolution Invariance**: Generates at resolutions/aspect ratios far beyond training data (e.g., 28x28 → 1024x1024)
-  with
-  minimal deformities.
-- **Dual Positional Embeddings**: Relative to image (edge-aware) and composition (inscribed square for uniform gaps),
-  using Fourier series with increasing frequencies.
-- **Gaussian Coordinate Jitter**: During training, adds noise to coords (stdev=1/(2*dim)) to force learning of
+- **Resolution Invariance**: Both RIAE and R2ID work agnostic of pixel density and resolution. This is because they
+  treat pixels as collections of separate points sampled from some function. Subsequently, they learn the function, not
+  the samples from it.
+- **Aspect Ratio Invariance**: Both RIAE and R2ID use a unique dual positional embedding system with extra coordinate
+  jitter during training. The system informs the model of both image edge boundaries and the proportions. This means
+  that center coordinates don't change by much when you change the aspect ratio, only the edges change a lot more (and
+  even then, at most by 50%), which means that the model generalizes really well.
+- **Transformer Based**: Both RIAE and R2ID rely on transformers for the most part in order to work. The pixels are the
+  tokens, containing both color and position information.
+- **Arbitrary AE compression**: RIAE is trained to compress by 4x, but due to the resolution invariant nature, it
+  generalizes to other resolutions too, even different aspect ratios. This is necessary as the main bottleneck behind
+  using attention in R2ID is that pixels are expensive, so we need to compress their amount somehow into depth, while
+  keeping the transformation reversible and resolution invariant.
+- **Gaussian Coordinate Jitter**: During training, noise is added to coords (stdev=1/(2*dim)) to force learning of
   continuous functions, not discrete points.
-- **Transformer-Based**: Encoder blocks (cloud point attention for composition) + decoder blocks (cloud point +
-  cross-attn for conditioning).
-- **Efficient Local Training**: 6.1M params, EMA with 0.9995 decay, AdamW cosine LR (1e-3 peak, 1e-5 end, 2400 warmup).
-- **No VAE/Unshuffle**: Direct pixel-space diffusion for purity, but plans for VAE integration for speed.
 
 ## Installation
 
-Clone the repository:
+Clone the repository or alternatively check the latest release:
 
 ```
 git clone https://github.com/Yegor-men/resolution-invariant-image-diffuser.git
@@ -46,16 +47,37 @@ The code was developed and tested on CUDA enabled RTX 5080 on Arch Linux in PyCh
 
 ## Usage
 
-To train, run the main training script `train_v2.py`. WARNING: the defaults are set to work on my hardware, will likely
-need manual tweaking.
+In order for the model to work, you need both RIAE and R2ID. Run `train_riae.py` to train and save an RIAE model; run
+`train_r2id.py` to train and save a R2ID model and a corresponding dummy text encoder.
 
-Assuming that you have the respective model and text encoder model in the `models/` directory, and the filename is
-correct in `inference_v2.py`, run `inference_v2.py` to diffuse images. The diffusion settings should be edited
-accordingly.
+Once the models are in `models/` folder, run `inference.py` to diffuse some images. Make sure that the file names match.
+The diffusion settings should be edited accordingly.
 
 ## Architecture Overview
 
-R2ID processes images in pixel space (no VAE yet) with these steps:
+RIAE turns images of size [b, col_channels, h, w] into [b, lat_channels, h/reduction, w/reduction] with these steps:
+
+1. Create an empty latent of the desired size
+2. Populate the empty latent with the respective coordinates from the dual system
+3. Create coordinates for the pixels in the image and concatenate the two
+4. For each latent pixel, run cross attention with the latent pixel making the query, and a random set of the image
+   pixels for the keys and values
+5. Project the embedding dim used for MHA down to the number of latent channels
+
+Then it has to turn a latent back out into pixel-space:
+
+1. Create an empty pixel-space image of the desired size
+2. Populate the empty pixel space with the respective coordinates from the dual system
+3. Create coordinates for the pixels in the latent and concatenate the two
+4. For each pixel in the final image, run cross attention with the pixel making the query, and a random set of the
+   latent pixels for the keys and values (25% for training, 100% for inference)
+5. Project the embedding dim used for MHA down to the number of color channels
+
+But RIAE can also compress and decompress to different aspect ratios and resolutions, also without trouble. Considering
+this, the latent is quite hard to interpret and does not contain anything remotely similar to how digits actually look
+like.
+
+R2ID is the actual image diffuser, and it works on the resolution invariant latent as such:
 
 - Compute dual coords (-0.5 to 0.5): Relative (inscribed square for composition) + absolute (edge-aware).
 - Add Gaussian jitter (train-only, std=1/(2*max_dim) for relative) to treat pixels as samples from a continuous
@@ -66,27 +88,27 @@ R2ID processes images in pixel space (no VAE yet) with these steps:
 - Decoder blocks: Cloud point + cross-attn to cond (reuses enc output for efficiency).
 - Project back to epsilon noise via 1x1 conv.
 
-See `modules/R2ID.py` for full implementation (SIID class). No pixel unshuffle—direct pixel ops for invariance.
+See `modules/r2id.py` for full implementation (RIAE and RIID classes).
 
 ## Results
 
-Trained on unaugmented 28x28 MNIST; generalizes impressively:
+Resulting images can be found in `media/`. Keep in mind, that this is super early in training, literally a couple hours
+total. Here are some examples:
 
-1024x1024: Clean, legible digits (uniform but artifact-free).
-Aspects (2:3, 3:4, 4:5, 9:16): Combines squish/crop intelligently.
-Double/Quad res: Sharp, minimal noise.
+16px
+![16px](media/16px.png)
 
-Examples in `media/` and Reddit posts (check my profile for links). T-scrape loss: Strong at low t (fine details).
+28px
+![28px](media/28px.png)
+
+32px native
+![32px](media/32px.png)
 
 ## Limitations & Future Work
 
-- Slow inference at high-res
-- Messy code—refactor pending
+- Messy code, refactor pending
 - 28x28 MNIST-only for now; test on CelebA next
-
-Plans: VAE integration for speed, subsampling/dropout for train efficiency, Linear/Flash attn for long seq, multi-label
-cond, recreate the effect where you can de-blur a pixelated video as long as the camera is moving in a similar way by
-training on lower-resolution data that's responsibly augmented.
+- more training
 
 Suggestions welcome—open issues/PRs.
 
@@ -96,6 +118,6 @@ This project is licensed under the MIT License—see LICENSE for details.
 
 ## Acknowledgments
 
-Inspired by discussions on r/MachineLearning, including suggestions left in the comments of the Reddit posts. Thanks to
+Inspired by discussions on r/MachineLearning, mainly suggestions left in the comments of the Reddit posts. Thanks to
 Google, OpenAI and xAI for developing their respective LLM chatbots that helped me with research, ideas, explanations
-and analyses of existing architectures.
+and analyses of diffusion architectures as this project began deep in the Dunning-Kruger valley.

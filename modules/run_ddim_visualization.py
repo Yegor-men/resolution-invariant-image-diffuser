@@ -11,13 +11,10 @@ def run_ddim_visualization(
         null_text_cond: torch.Tensor,
         pos_text_cond: torch.Tensor,
         alpha_bar_fn,
-        render_image_fn=None,
         num_steps: int = 50,
         cfg_scale: float = 1.0,  # conservative default for debugging
         eta: float = 0.0,
-        render_every: int = 1,
         device: Optional[torch.device] = None,
-        title: str = None,
 ):
     device = device or initial_noise.device
     model = model.to(device)
@@ -32,11 +29,7 @@ def run_ddim_visualization(
 
     eps_small = 1e-6
 
-    # initial render
-    # if render_image_fn is not None:
-    # 	render_image_fn(torch.clamp((x + 1.0) / 2.0, 0.0, 1.0))
-
-    for i in tqdm(range(num_steps), total=num_steps, desc=f"{title if title is not None else "diffusing"}"):
+    for i in tqdm(range(num_steps), total=num_steps, desc=f"diffusing"):
         t_val = float(ts[i].item())
         s_val = float(ts[i + 1].item())
 
@@ -60,10 +53,6 @@ def run_ddim_visualization(
         sqrt_1_a_t = torch.sqrt((1.0 - a_t_view).clamp(min=0.0))
         x0_hat = (x - sqrt_1_a_t * eps_hat) / (sqrt_a_t + eps_small)
 
-        # render reconstruction
-        if ((i + 1) % render_every == 0) and (render_image_fn is not None):
-            render_image_fn(torch.clamp((x0_hat + 1.0) / 2.0, 0.0, 1.0), title=title)
-
         # direction and ancestral sigma
         eps_dir = (x - sqrt_a_t * x0_hat) / (sqrt_1_a_t + eps_small)
 
@@ -84,8 +73,5 @@ def run_ddim_visualization(
     final_t = torch.zeros((B,), device=device, dtype=torch.float32)
     final_a = alpha_bar_fn(final_t).to(device).view(B, 1, 1, 1).clamp(min=eps_small)
     final_x0_hat = (x - torch.sqrt((1.0 - final_a).clamp(min=0.0)) * eps_hat) / (torch.sqrt(final_a) + eps_small)
-
-    if render_image_fn is not None:
-        render_image_fn(torch.clamp((final_x0_hat + 1.0) / 2.0, 0.0, 1.0), title=title)
 
     return final_x0_hat, x
