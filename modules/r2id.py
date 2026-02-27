@@ -2,6 +2,52 @@ import torch
 from torch import nn
 
 
+class MultiHeadLinearAttention(nn.Module):
+    def __init__(self, embed_dim: int, num_heads: int = 8):
+        super().__init__()
+        assert embed_dim % num_heads == 0, f"embed_dim {embed_dim} must be divisible by num_heads {num_heads}"
+        self.num_heads = num_heads
+        self.head_dim = embed_dim // num_heads
+
+        self.q_proj = nn.Linear(embed_dim, embed_dim)
+        self.k_proj = nn.Linear(embed_dim, embed_dim)
+        self.v_proj = nn.Linear(embed_dim, embed_dim)
+        self.out_proj = nn.Linear(embed_dim, embed_dim)
+
+        self.norm_q = nn.LayerNorm(embed_dim)
+        self.norm_k = nn.LayerNorm(embed_dim)
+
+    def forward(self, query_embed: torch.Tensor, key_embed: torch.Tensor, value: torch.Tensor):
+        B, Nq, _ = query_embed.shape
+        _, Nk, _ = key_embed.shape
+
+        # Project & head-split
+        q = self.norm_q(self.q_proj(query_embed)).view(B, Nq, self.num_heads, self.head_dim)
+        k = self.norm_k(self.k_proj(key_embed)).view(B, Nk, self.num_heads, self.head_dim)
+        v = self.v_proj(value).view(B, Nk, self.num_heads, self.head_dim)
+
+        # Positive feature map (ELU+1)
+        q = nn.functional.elu(q) + 1.0
+        k = nn.functional.elu(k) + 1.0
+
+        # Transpose to (B, heads, seq, head_dim) for clean einsums
+        q = q.transpose(1, 2)  # (B, H, Nq, D)
+        k = k.transpose(1, 2)  # (B, H, Nk, D)
+        v = v.transpose(1, 2)  # (B, H, Nk, D)
+
+        # Linear attention core
+        kv_sum = torch.einsum('b h n d, b h n e -> b h d e', k, v)  # (B, H, D, D)
+        k_sum = k.sum(dim=2)  # (B, H, D)
+
+        # Query the summary
+        num = torch.einsum('b h q d, b h d e -> b h q e', q, kv_sum)
+        den = torch.einsum('b h q d, b h d -> b h q', q, k_sum).unsqueeze(-1) + 1e-8
+
+        out = (num / den).transpose(1, 2).reshape(B, Nq, -1)  # back to (B, Nq, embed_dim)
+
+        return self.out_proj(out)
+
+
 class ImageNorm(nn.Module):
     def __init__(self, num_channels: int, affine: bool = False):
         super().__init__()
@@ -173,11 +219,16 @@ class CrossAttention(nn.Module):
         super().__init__()
         assert d_channels % num_heads == 0, f"d_channels ({d_channels}) must be divisible by num_heads ({num_heads})"
 
-        self.mha = nn.MultiheadAttention(
+        # self.mha = nn.MultiheadAttention(
+        #     embed_dim=d_channels,
+        #     num_heads=num_heads,
+        #     batch_first=True,
+        #     dropout=dropout,
+        # )
+
+        self.mha = MultiHeadLinearAttention(
             embed_dim=d_channels,
             num_heads=num_heads,
-            batch_first=True,
-            dropout=dropout,
         )
 
     def forward(self, image, text_tokens):
@@ -187,7 +238,8 @@ class CrossAttention(nn.Module):
         Q = image.permute(0, 2, 3, 1).contiguous().view(b, s, d)  # [B, S, D]
 
         # MHA wants shapes: (B, seq_q, D), (B, seq_k, D), (B, seq_k, D)
-        attn_out, _ = self.mha(Q, text_tokens, text_tokens, need_weights=False)  # [B, S, D]
+        # attn_out, _ = self.mha(Q, text_tokens, text_tokens, need_weights=False)  # [B, S, D]
+        attn_out = self.mha(Q, text_tokens, text_tokens)
 
         # reshape back to image grid [B, D, H, W]
         attn_out = attn_out.view(b, h, w, d).permute(0, 3, 1, 2).contiguous()  # [B, D, H, W]
@@ -199,11 +251,16 @@ class CloudAttention(nn.Module):
     def __init__(self, d_channels: int, num_heads: int, dropout: float = 0.0):
         super().__init__()
         assert d_channels % num_heads == 0, f"d_channels ({d_channels}) must be divisible by num_heads ({num_heads})"
-        self.mha = nn.MultiheadAttention(
+        # self.mha = nn.MultiheadAttention(
+        #     embed_dim=d_channels,
+        #     num_heads=num_heads,
+        #     batch_first=True,
+        #     dropout=dropout,
+        # )
+
+        self.mha = MultiHeadLinearAttention(
             embed_dim=d_channels,
             num_heads=num_heads,
-            batch_first=True,
-            dropout=dropout,
         )
 
     def forward(self, image, num_clouds: int = 1):
@@ -219,7 +276,8 @@ class CloudAttention(nn.Module):
         group_size = total_pixels // num_clouds
         x_groups = x_shuffled.permute(0, 2, 1).contiguous().view(b * num_clouds, group_size, d)
 
-        attn_out, _ = self.mha(x_groups, x_groups, x_groups, need_weights=False)
+        # attn_out, _ = self.mha(x_groups, x_groups, x_groups, need_weights=False)
+        attn_out = self.mha(x_groups, x_groups, x_groups)
 
         attn_out = attn_out.view(b, num_clouds, group_size, d).permute(0, 3, 1, 2).contiguous()
         attn_out = attn_out.view(b, d, total_pixels)
@@ -374,68 +432,18 @@ class DecBlock(nn.Module):
 
 
 # ======================================================================================================================
-import torch
-import torch.nn as nn
-import math
-
-import torch.nn.functional as F
-
-
-class MultiHeadLinearAttention(nn.Module):
-    def __init__(self, embed_dim: int, num_heads: int = 8):
-        super().__init__()
-        assert embed_dim % num_heads == 0, f"embed_dim {embed_dim} must be divisible by num_heads {num_heads}"
-        self.num_heads = num_heads
-        self.head_dim = embed_dim // num_heads
-
-        self.q_proj = nn.Linear(embed_dim, embed_dim)
-        self.k_proj = nn.Linear(embed_dim, embed_dim)
-        self.v_proj = nn.Linear(embed_dim, embed_dim)
-        self.out_proj = nn.Linear(embed_dim, embed_dim)
-
-        self.norm_q = nn.LayerNorm(embed_dim)
-        self.norm_k = nn.LayerNorm(embed_dim)
-
-    def forward(self, query_embed: torch.Tensor, key_embed: torch.Tensor, value: torch.Tensor):
-        B, Nq, _ = query_embed.shape
-        _, Nk, _ = key_embed.shape
-
-        # Project & head-split
-        q = self.norm_q(self.q_proj(query_embed)).view(B, Nq, self.num_heads, self.head_dim)
-        k = self.norm_k(self.k_proj(key_embed)).view(B, Nk, self.num_heads, self.head_dim)
-        v = self.v_proj(value).view(B, Nk, self.num_heads, self.head_dim)
-
-        # Positive feature map (ELU+1)
-        q = F.elu(q) + 1.0
-        k = F.elu(k) + 1.0
-
-        # Transpose to (B, heads, seq, head_dim) for clean einsums
-        q = q.transpose(1, 2)  # (B, H, Nq, D)
-        k = k.transpose(1, 2)  # (B, H, Nk, D)
-        v = v.transpose(1, 2)  # (B, H, Nk, D)
-
-        # Linear attention core
-        kv_sum = torch.einsum('b h n d, b h n e -> b h d e', k, v)  # (B, H, D, D)
-        k_sum = k.sum(dim=2)  # (B, H, D)
-
-        # Query the summary
-        num = torch.einsum('b h q d, b h d e -> b h q e', q, kv_sum)
-        den = torch.einsum('b h q d, b h d -> b h q', q, k_sum).unsqueeze(-1) + 1e-8
-
-        out = (num / den).transpose(1, 2).reshape(B, Nq, -1)  # back to (B, Nq, embed_dim)
-
-        return self.out_proj(out)
 
 
 class LinearTransformerBlock(nn.Module):
-    def __init__(self, embed_dim: int = 1024, num_heads: int = 8, ffn_mult: int = 4):
+    def __init__(self, embed_dim: int = 1024, num_heads: int = 8, dropout: float = 0.0):
         super().__init__()
         self.attn = MultiHeadLinearAttention(embed_dim, num_heads)
         self.norm1 = nn.LayerNorm(embed_dim)
         self.ffn = nn.Sequential(
-            nn.Linear(embed_dim, embed_dim * ffn_mult),
-            nn.GELU(),
-            nn.Linear(embed_dim * ffn_mult, embed_dim),
+            nn.Linear(embed_dim, embed_dim * 4),
+            nn.SiLU(),
+            nn.Dropout(dropout),
+            nn.Linear(embed_dim * 4, embed_dim),
         )
         self.norm2 = nn.LayerNorm(embed_dim)
 
@@ -455,13 +463,20 @@ class R2IR(nn.Module):
             embed_dim: int = 1024,
             pos_high_freq: int = 16,
             pos_low_freq: int = 16,
+            enc_blocks: int = 2,
+            dec_blocks: int = 2,
             num_heads: int = 16,
+            mha_dropout: float = 0.0,
+            ffn_dropout: float = 0.0,
     ):
         super().__init__()
         self.col_channels = col_channels
         self.lat_channels = lat_channels
         self.embed_dim = embed_dim
         self.pos_dim = 4 * (pos_high_freq + pos_low_freq)  # same calculation as RIID
+        self.num_enc_blocks = int(enc_blocks)
+        self.num_dec_blocks = int(dec_blocks)
+        self.num_heads = int(num_heads)
 
         self.pos_embed = PosEmbed2d(pos_high_freq, pos_low_freq)
 
@@ -487,44 +502,38 @@ class R2IR(nn.Module):
         nn.init.zeros_(self.dec_out_proj[-2].weight)
         nn.init.zeros_(self.dec_out_proj[-2].bias)
 
-        self.enc_block = LinearTransformerBlock(embed_dim=self.embed_dim, num_heads=num_heads)
-        self.dec_block = LinearTransformerBlock(embed_dim=self.embed_dim, num_heads=num_heads)
+        self.enc_blocks = nn.ModuleList([
+            LinearTransformerBlock(
+                embed_dim=embed_dim,
+                num_heads=num_heads,
+                dropout=ffn_dropout,
+            ) for _ in range(enc_blocks)
+        ])
+
+        self.dec_blocks = nn.ModuleList([
+            LinearTransformerBlock(
+                embed_dim=embed_dim,
+                num_heads=num_heads,
+                dropout=ffn_dropout,
+            ) for _ in range(dec_blocks)
+        ])
 
     def print_model_summary(self):
         def count_params(module):
             return sum(p.numel() for p in module.parameters() if p.requires_grad)
 
-        # Position embedding
-        pos_params = count_params(self.pos_embed)
-
-        # Projection layers
-        color_to_embed_params = count_params(self.color_to_embed_proj)
-        pos_to_embed_params = count_params(self.pos_to_embed_proj)
-        latent_to_embed_params = count_params(self.latent_to_embed_proj)
-        enc_out_params = count_params(self.enc_out_proj)
-        dec_out_params = count_params(self.dec_out_proj)
-
-        # Attention mechanisms
-        enc_mha_params = count_params(self.enc_block)
-        dec_mha_params = count_params(self.dec_block)
-
-        # Total
-        total = sum(p.numel() for p in self.parameters() if p.requires_grad)
-
-        print("=== RIAE Model Summary ===")
-        print(f"Configuration:")
-        print(f"  embed_dim: {self.embed_dim} | pos_dim: {self.pos_dim * 2}")
-        print(f"  col/lat channels: {self.col_channels}/{self.lat_channels}")
-        print(f"\nParameter Breakdown:")
-        print(f"  Position Embedding:     {pos_params:,}")
-        print(f"  Color→Embed Proj:      {color_to_embed_params:,}")
-        print(f"  Pos→Embed Proj:        {pos_to_embed_params:,}")
-        print(f"  Latent→Embed Proj:     {latent_to_embed_params:,}")
-        print(f"  Encoder Output Proj:    {enc_out_params:,}")
-        print(f"  Decoder Output Proj:    {dec_out_params:,}")
-        print(f"  Encoder MHA:           {enc_mha_params:,}")
-        print(f"  Decoder MHA:           {dec_mha_params:,}")
-        print(f"\nTotal Trainable Parameters: {total:,}")
+        print("=== R2IR Model Summary ===")
+        print(f"\tembed_dim: {self.embed_dim} | pos_dim: {self.pos_dim * 2}")
+        print(f"\tcol/lat channels: {self.col_channels}/{self.lat_channels}")
+        print(f"Total Trainable Parameters: {sum(p.numel() for p in self.parameters() if p.requires_grad):,}")
+        print(f"\tPosition Embedding: {count_params(self.pos_embed):,}")
+        print(f"\tColor→Embed Proj: {count_params(self.color_to_embed_proj):,}")
+        print(f"\tPos→Embed Proj: {count_params(self.pos_to_embed_proj):,}")
+        print(f"\tLatent→Embed Proj: {count_params(self.latent_to_embed_proj):,}")
+        print(f"\tEncoder Output Proj: {count_params(self.enc_out_proj):,}")
+        print(f"\tDecoder Output Proj: {count_params(self.dec_out_proj):,}")
+        print(f"\tEncoder Blocks: {count_params(self.enc_blocks):,}")
+        print(f"\tDecoder Blocks: {count_params(self.dec_blocks):,}")
 
     def _get_pos(self, b: int, h: int, w: int):
         rel = self.pos_embed(b, h, w, relative=True)
@@ -546,9 +555,10 @@ class R2IR(nn.Module):
         latent_pos_map = self._get_pos(b, lh, lw)
         latent_queries = self.pos_to_embed_proj(latent_pos_map).permute(0, 2, 3, 1).reshape(b, -1, self.embed_dim)
 
-        latent_embeds = self.enc_block(latent_queries, input_tokens, input_tokens)
+        for enc_block in self.enc_blocks:
+            latent_queries = enc_block(latent_queries, input_tokens, input_tokens)
 
-        latent = latent_embeds.reshape(b, lh, lw, self.embed_dim).permute(0, 3, 1, 2).contiguous()
+        latent = latent_queries.reshape(b, lh, lw, self.embed_dim).permute(0, 3, 1, 2).contiguous()
         latent = self.enc_out_proj(latent)
         return latent
 
@@ -567,9 +577,10 @@ class R2IR(nn.Module):
         out_pos_map = self._get_pos(b, ih, iw)
         out_queries = self.pos_to_embed_proj(out_pos_map).permute(0, 2, 3, 1).reshape(b, -1, self.embed_dim)
 
-        out_embeds = self.dec_block(out_queries, latent_tokens, latent_tokens)
+        for dec_block in self.dec_blocks:
+            out_queries = dec_block(out_queries, latent_tokens, latent_tokens)
 
-        out = out_embeds.reshape(b, ih, iw, self.embed_dim).permute(0, 3, 1, 2).contiguous()
+        out = out_queries.reshape(b, ih, iw, self.embed_dim).permute(0, 3, 1, 2).contiguous()
         out = self.dec_out_proj(out)
         return out
 
