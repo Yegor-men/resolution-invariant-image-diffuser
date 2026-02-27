@@ -276,6 +276,45 @@ class EncBlock(nn.Module):
         return final_image
 
 
+class EncBlockLight(nn.Module):
+    def __init__(
+            self,
+            d_channels: int,
+            num_heads: int,
+            cloud_dropout: float = 0.0,
+            ffn_dropout: float = 0.0,
+    ):
+        super().__init__()
+        self.d_channels = d_channels
+
+        self.cloud_attn = CloudAttention(
+            d_channels=d_channels,
+            num_heads=num_heads,
+            dropout=cloud_dropout,
+        )
+        self.cloud_scalar = nn.Parameter(torch.ones(d_channels))
+
+        self.ffn = ImageFFN(d_channels, ffn_dropout)
+        self.ffn_scalar = nn.Parameter(torch.ones(d_channels))
+
+        self.final_scalar = nn.Parameter(torch.ones(d_channels) * 0.1)
+
+    def forward(self, image, num_clouds: int = 1):
+        working_image = image
+
+        cloud_out = self.cloud_attn(working_image, num_clouds)
+
+        working_image = working_image + cloud_out * self.cloud_scalar.view(1, self.d_channels, 1, 1)
+
+        ffn_out = self.ffn(working_image)
+
+        working_image = working_image + ffn_out * self.ffn_scalar.view(1, self.d_channels, 1, 1)
+
+        final_image = image + working_image * self.final_scalar.view(1, self.d_channels, 1, 1)
+
+        return final_image
+
+
 class DecBlock(nn.Module):
     def __init__(
             self,
@@ -335,30 +374,99 @@ class DecBlock(nn.Module):
 
 
 # ======================================================================================================================
+import torch
+import torch.nn as nn
+import math
 
-class RIAE(nn.Module):
+import torch.nn.functional as F
+
+
+class MultiHeadLinearAttention(nn.Module):
+    def __init__(self, embed_dim: int, num_heads: int = 8):
+        super().__init__()
+        assert embed_dim % num_heads == 0, f"embed_dim {embed_dim} must be divisible by num_heads {num_heads}"
+        self.num_heads = num_heads
+        self.head_dim = embed_dim // num_heads
+
+        self.q_proj = nn.Linear(embed_dim, embed_dim)
+        self.k_proj = nn.Linear(embed_dim, embed_dim)
+        self.v_proj = nn.Linear(embed_dim, embed_dim)
+        self.out_proj = nn.Linear(embed_dim, embed_dim)
+
+        self.norm_q = nn.LayerNorm(embed_dim)
+        self.norm_k = nn.LayerNorm(embed_dim)
+
+    def forward(self, query_embed: torch.Tensor, key_embed: torch.Tensor, value: torch.Tensor):
+        B, Nq, _ = query_embed.shape
+        _, Nk, _ = key_embed.shape
+
+        # Project & head-split
+        q = self.norm_q(self.q_proj(query_embed)).view(B, Nq, self.num_heads, self.head_dim)
+        k = self.norm_k(self.k_proj(key_embed)).view(B, Nk, self.num_heads, self.head_dim)
+        v = self.v_proj(value).view(B, Nk, self.num_heads, self.head_dim)
+
+        # Positive feature map (ELU+1)
+        q = F.elu(q) + 1.0
+        k = F.elu(k) + 1.0
+
+        # Transpose to (B, heads, seq, head_dim) for clean einsums
+        q = q.transpose(1, 2)  # (B, H, Nq, D)
+        k = k.transpose(1, 2)  # (B, H, Nk, D)
+        v = v.transpose(1, 2)  # (B, H, Nk, D)
+
+        # Linear attention core
+        kv_sum = torch.einsum('b h n d, b h n e -> b h d e', k, v)  # (B, H, D, D)
+        k_sum = k.sum(dim=2)  # (B, H, D)
+
+        # Query the summary
+        num = torch.einsum('b h q d, b h d e -> b h q e', q, kv_sum)
+        den = torch.einsum('b h q d, b h d -> b h q', q, k_sum).unsqueeze(-1) + 1e-8
+
+        out = (num / den).transpose(1, 2).reshape(B, Nq, -1)  # back to (B, Nq, embed_dim)
+
+        return self.out_proj(out)
+
+
+class LinearTransformerBlock(nn.Module):
+    def __init__(self, embed_dim: int = 1024, num_heads: int = 8, ffn_mult: int = 4):
+        super().__init__()
+        self.attn = MultiHeadLinearAttention(embed_dim, num_heads)
+        self.norm1 = nn.LayerNorm(embed_dim)
+        self.ffn = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim * ffn_mult),
+            nn.GELU(),
+            nn.Linear(embed_dim * ffn_mult, embed_dim),
+        )
+        self.norm2 = nn.LayerNorm(embed_dim)
+
+    def forward(self, query_embed: torch.Tensor, key_embed: torch.Tensor, value: torch.Tensor):
+        # Residual + attention
+        x = query_embed + self.attn(self.norm1(query_embed), key_embed, value)
+        # Residual + FFN
+        x = x + self.ffn(self.norm2(x))
+        return x
+
+
+class R2IR(nn.Module):
     def __init__(
             self,
             col_channels: int = 1,
-            lat_channels: int = 16,
-            embed_dim: int = 128,
-            reduction: int = 4,
-            pos_high_freq: int = 8,
-            pos_low_freq: int = 3,
-            num_heads: int = 1,
-            dropout: float = 0.1,
+            lat_channels: int = 768,
+            embed_dim: int = 1024,
+            pos_high_freq: int = 16,
+            pos_low_freq: int = 16,
+            num_heads: int = 16,
     ):
         super().__init__()
         self.col_channels = col_channels
         self.lat_channels = lat_channels
         self.embed_dim = embed_dim
-        self.reduction = reduction
         self.pos_dim = 4 * (pos_high_freq + pos_low_freq)  # same calculation as RIID
 
         self.pos_embed = PosEmbed2d(pos_high_freq, pos_low_freq)
 
         # col_c + pos -> embed dim
-        self.enc_in_proj = nn.Conv2d(col_channels + self.pos_dim * 2, embed_dim, 1)
+        self.color_to_embed_proj = nn.Conv2d(col_channels + self.pos_dim * 2, embed_dim, 1)
 
         # pos -> embed_dim
         self.pos_to_embed_proj = nn.Conv2d(self.pos_dim * 2, embed_dim, 1)
@@ -366,123 +474,103 @@ class RIAE(nn.Module):
         # lat_c + pos -> embed dim
         self.latent_to_embed_proj = nn.Conv2d(lat_channels + self.pos_dim * 2, embed_dim, 1)
 
-        # output head for encoding (to pure lat_channels colors)
+        # output head for encoding (to lat_channels colors)
         self.enc_out_proj = nn.Conv2d(embed_dim, lat_channels, 1)
-        nn.init.zeros_(self.enc_out_proj.weight)
-        nn.init.zeros_(self.enc_out_proj.bias)
+        # nn.init.zeros_(self.enc_out_proj.weight)
+        # nn.init.zeros_(self.enc_out_proj.bias)
 
         # Output head for decoding (to col_channels colors)
-        self.dec_out_proj = nn.Conv2d(embed_dim, col_channels, 1)
-        nn.init.zeros_(self.dec_out_proj.weight)
-        nn.init.zeros_(self.dec_out_proj.bias)
+        self.dec_out_proj = nn.Sequential(
+            nn.Conv2d(embed_dim, col_channels, 1),
+            nn.Tanh()
+        )
+        nn.init.zeros_(self.dec_out_proj[-2].weight)
+        nn.init.zeros_(self.dec_out_proj[-2].bias)
 
-        # Cross-attention (pure transfer, matching CrossAttention style)
-        self.enc_mha = nn.MultiheadAttention(
-            embed_dim=embed_dim, num_heads=num_heads, batch_first=True, dropout=dropout
-        )
-        self.dec_mha = nn.MultiheadAttention(
-            embed_dim=embed_dim, num_heads=num_heads, batch_first=True, dropout=dropout
-        )
+        self.enc_block = LinearTransformerBlock(embed_dim=self.embed_dim, num_heads=num_heads)
+        self.dec_block = LinearTransformerBlock(embed_dim=self.embed_dim, num_heads=num_heads)
 
     def print_model_summary(self):
-        total = sum(p.numel() for p in self.parameters() if p.requires_grad)
-        print(f"Trainable parameters: {total:,}")
+        def count_params(module):
+            return sum(p.numel() for p in module.parameters() if p.requires_grad)
 
-        print(f"emb_dim: {self.embed_dim} | pos: {self.pos_dim * 2} | col/lat: {self.col_channels}/{self.lat_channels}")
+        # Position embedding
+        pos_params = count_params(self.pos_embed)
+
+        # Projection layers
+        color_to_embed_params = count_params(self.color_to_embed_proj)
+        pos_to_embed_params = count_params(self.pos_to_embed_proj)
+        latent_to_embed_params = count_params(self.latent_to_embed_proj)
+        enc_out_params = count_params(self.enc_out_proj)
+        dec_out_params = count_params(self.dec_out_proj)
+
+        # Attention mechanisms
+        enc_mha_params = count_params(self.enc_block)
+        dec_mha_params = count_params(self.dec_block)
+
+        # Total
+        total = sum(p.numel() for p in self.parameters() if p.requires_grad)
+
+        print("=== RIAE Model Summary ===")
+        print(f"Configuration:")
+        print(f"  embed_dim: {self.embed_dim} | pos_dim: {self.pos_dim * 2}")
+        print(f"  col/lat channels: {self.col_channels}/{self.lat_channels}")
+        print(f"\nParameter Breakdown:")
+        print(f"  Position Embedding:     {pos_params:,}")
+        print(f"  Color→Embed Proj:      {color_to_embed_params:,}")
+        print(f"  Pos→Embed Proj:        {pos_to_embed_params:,}")
+        print(f"  Latent→Embed Proj:     {latent_to_embed_params:,}")
+        print(f"  Encoder Output Proj:    {enc_out_params:,}")
+        print(f"  Decoder Output Proj:    {dec_out_params:,}")
+        print(f"  Encoder MHA:           {enc_mha_params:,}")
+        print(f"  Decoder MHA:           {dec_mha_params:,}")
+        print(f"\nTotal Trainable Parameters: {total:,}")
 
     def _get_pos(self, b: int, h: int, w: int):
         rel = self.pos_embed(b, h, w, relative=True)
         abs = self.pos_embed(b, h, w, relative=False)
         return torch.cat([rel, abs], dim=1)  # [B, 2*pos_dim, H, W]
 
-    def encode(self, image, height: int = None, width: int = None, fraction: float = None):
-        """[B, C, H, W] → [B, lat_channels, lh, lw] pure latent colors"""
-        b, _, h, w = image.shape
+    def encode(self, image, scale: int = 2, height: int = None, width: int = None):
+        b, _, ih, iw = image.shape
         if height is None or width is None:
-            assert h % self.reduction == 0, f"Image height must be divisible by {self.reduction}"
-            assert w % self.reduction == 0, f"Image width must be divisible by {self.reduction}"
-            height = h // self.reduction
-            width = w // self.reduction
+            height = ih // scale
+            width = iw // scale
         lh, lw = height, width
 
-        if fraction is None:
-            fraction = 1 / (self.reduction ** 2)
-
-        N = h * w
-        N_latent = lh * lw
-        K = max(4, int(N * fraction))  # pixels per latent cloud
-
-        # Input tokens (color + pos → embed_dim)
-        pos = self._get_pos(b, h, w)
+        # Input tokens (color + pos)
+        pos = self._get_pos(b, ih, iw)
         stacked = torch.cat([image, pos], dim=1)
-        input_grid = self.enc_in_proj(stacked)  # [B, embed_dim, H, W]
-        input_tokens = input_grid.permute(0, 2, 3, 1).reshape(b, N, self.embed_dim)
+        input_tokens = self.color_to_embed_proj(stacked).permute(0, 2, 3, 1).reshape(b, -1, self.embed_dim)
 
-        # Latent queries (pos only → embed_dim)
-        latent_pos = self._get_pos(b, lh, lw)
-        latent_queries = self.pos_to_embed_proj(latent_pos)  # [B, embed_dim, lh, lw]
-        latent_queries = latent_queries.permute(0, 2, 3, 1).reshape(b, N_latent, self.embed_dim)
+        latent_pos_map = self._get_pos(b, lh, lw)
+        latent_queries = self.pos_to_embed_proj(latent_pos_map).permute(0, 2, 3, 1).reshape(b, -1, self.embed_dim)
 
-        # Per-latent-pixel random clouds
-        idx = torch.randint(0, N, (b, N_latent, K), device=image.device)
+        latent_embeds = self.enc_block(latent_queries, input_tokens, input_tokens)
 
-        kv = torch.gather(
-            input_tokens.unsqueeze(1).expand(-1, N_latent, -1, -1),
-            2,
-            idx.unsqueeze(-1).expand(-1, -1, -1, self.embed_dim)
-        )  # [B, N_latent, K, embed_dim]
-
-        # Batched MHA
-        Q = latent_queries.view(b * N_latent, 1, self.embed_dim)
-        KV = kv.view(b * N_latent, K, self.embed_dim)
-
-        attn_out, _ = self.enc_mha(Q, KV, KV, need_weights=False)
-
-        latent = attn_out.view(b, lh, lw, self.embed_dim).permute(0, 3, 1, 2).contiguous()
-        latent = self.enc_out_proj(latent)  # to pure lat_channels
+        latent = latent_embeds.reshape(b, lh, lw, self.embed_dim).permute(0, 3, 1, 2).contiguous()
+        latent = self.enc_out_proj(latent)
         return latent
 
-    def decode(self, latent, height: int = None, width: int = None, fraction: float = 1.0):
-        b, d, lh, lw = latent.shape
+    def decode(self, latent, scale: int = 2, height: int = None, width: int = None):
+        b, _, lh, lw = latent.shape
         if height is None or width is None:
-            target_h = lh * self.reduction
-            target_w = lw * self.reduction
-        else:
-            target_h = height
-            target_w = width
-        N_latent = lh * lw
-        N_out = target_h * target_w
+            height = lh * scale
+            width = lw * scale
+        ih, iw = height, width
 
-        # Latent tokens (color + pos → embed_dim)
-        latent_pos = self._get_pos(b, lh, lw)
-        stacked = torch.cat([latent, latent_pos], dim=1)
-        latent_grid = self.latent_to_embed_proj(stacked)  # [B, embed_dim, lh, lw]
-        latent_tokens = latent_grid.permute(0, 2, 3, 1).reshape(b, N_latent, self.embed_dim)
+        # Latent tokens (latent_color + pos)
+        latent_pos_map = self._get_pos(b, lh, lw)
+        stacked = torch.cat([latent, latent_pos_map], dim=1)
+        latent_tokens = self.latent_to_embed_proj(stacked).permute(0, 2, 3, 1).reshape(b, -1, self.embed_dim)
 
-        # Output pixel queries (pos only → embed_dim)
-        out_pos = self._get_pos(b, target_h, target_w)
-        out_queries = self.pos_to_embed_proj(out_pos)  # [B, embed_dim, target_h, target_w]
-        out_queries = out_queries.permute(0, 2, 3, 1).reshape(b, N_out, self.embed_dim)
+        out_pos_map = self._get_pos(b, ih, iw)
+        out_queries = self.pos_to_embed_proj(out_pos_map).permute(0, 2, 3, 1).reshape(b, -1, self.embed_dim)
 
-        # Optional subsampling of latent (for testing)
-        if fraction < 1.0:
-            K = max(4, int(N_latent * fraction))
-            idx = torch.randint(0, N_latent, (b, N_out, K), device=latent.device)
-            kv = torch.gather(
-                latent_tokens.unsqueeze(1).expand(-1, N_out, -1, -1),
-                2,
-                idx.unsqueeze(-1).expand(-1, -1, -1, self.embed_dim)
-            )
-            KV = kv.view(b * N_out, K, self.embed_dim)
-        else:
-            KV = latent_tokens.unsqueeze(1).expand(-1, N_out, -1, -1).reshape(b * N_out, N_latent, self.embed_dim)
+        out_embeds = self.dec_block(out_queries, latent_tokens, latent_tokens)
 
-        Q = out_queries.view(b * N_out, 1, self.embed_dim)
-
-        attn_out, _ = self.dec_mha(Q, KV, KV, need_weights=False)
-
-        out = attn_out.view(b, target_h, target_w, self.embed_dim).permute(0, 3, 1, 2).contiguous()
-        out = self.dec_out_proj(out)  # to pure col_channels
+        out = out_embeds.reshape(b, ih, iw, self.embed_dim).permute(0, 3, 1, 2).contiguous()
+        out = self.dec_out_proj(out)
         return out
 
 

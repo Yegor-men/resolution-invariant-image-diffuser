@@ -1,8 +1,8 @@
-![RIAE-R2ID Banner](media/RIAE_R2ID_banner.png)
+![R2IR-R2ID Banner](media/R2IR_R2ID_banner.png)
 
-# RIAE-R2ID: Resolution Invariant Auto Encoder - Resolution Invariant Image Diffuser
+# R2IR-R2ID: Resolution Invariant Auto Encoder - Resolution Invariant Image Diffuser
 
-RIAE (Resolution Invariant Auto Encoder)  and R2ID (Resolution Invariant Image Diffuser) are a novel pair of
+R2IR (Resolution Invariant Image Resampler)  and R2ID (Resolution Invariant Image Diffuser) are a novel pair of
 architectures for diffusion, designed to address key limitations in traditional models such as UNet and DiT. They treat
 images as continuous functions rather than fixed pixel grids, enabling robust generalization to arbitrary resolutions
 and aspect ratios without artifacts like doubling or squishing. The model learns an underlying data function, ignoring
@@ -12,16 +12,16 @@ This is a proof-of-concept implementation, trained on unaugmented 32x32 MNIST di
 
 ## Features
 
-- **Resolution Invariance**: Both RIAE and R2ID work agnostic of pixel density and resolution. This is because they
+- **Resolution Invariance**: Both R2IR and R2ID work agnostic of pixel density and resolution. This is because they
   treat pixels as collections of separate points sampled from some function. Subsequently, they learn the function, not
   the samples from it.
-- **Aspect Ratio Invariance**: Both RIAE and R2ID use a unique dual positional embedding system with extra coordinate
+- **Aspect Ratio Invariance**: Both R2IR and R2ID use a unique dual positional embedding system with extra coordinate
   jitter during training. The system informs the model of both image edge boundaries and the proportions. This means
   that center coordinates don't change by much when you change the aspect ratio, only the edges change a lot more (and
   even then, at most by 50%), which means that the model generalizes really well.
-- **Transformer Based**: Both RIAE and R2ID rely on transformers for the most part in order to work. The pixels are the
+- **Transformer Based**: Both R2IR and R2ID rely on transformers for the most part in order to work. The pixels are the
   tokens, containing both color and position information.
-- **Arbitrary AE compression**: RIAE is trained to compress by 4x, but due to the resolution invariant nature, it
+- **Arbitrary AE compression**: R2IR is trained to compress by 4x, but due to the resolution invariant nature, it
   generalizes to other resolutions too, even different aspect ratios. This is necessary as the main bottleneck behind
   using attention in R2ID is that pixels are expensive, so we need to compress their amount somehow into depth, while
   keeping the transformation reversible and resolution invariant.
@@ -47,7 +47,7 @@ The code was developed and tested on CUDA enabled RTX 5080 on Arch Linux in PyCh
 
 ## Usage
 
-In order for the model to work, you need both RIAE and R2ID. Run `train_riae.py` to train and save an RIAE model; run
+In order for the model to work, you need both R2IR and R2ID. Run `train_r2ir.py` to train and save an R2IR model; run
 `train_r2id.py` to train and save a R2ID model and a corresponding dummy text encoder.
 
 Once the models are in `models/` folder, run `inference.py` to diffuse some images. Make sure that the file names match.
@@ -55,7 +55,7 @@ The diffusion settings should be edited accordingly.
 
 ## Architecture Overview
 
-RIAE turns images of size [b, col_channels, h, w] into [b, lat_channels, h/reduction, w/reduction] with these steps:
+R2IR turns images of size [b, col_channels, h, w] into [b, lat_channels, h/reduction, w/reduction] with these steps:
 
 1. Create an empty latent of the desired size
 2. Populate the empty latent with the respective coordinates from the dual system
@@ -73,7 +73,7 @@ Then it has to turn a latent back out into pixel-space:
    latent pixels for the keys and values (25% for training, 100% for inference)
 5. Project the embedding dim used for MHA down to the number of color channels
 
-But RIAE can also compress and decompress to different aspect ratios and resolutions, also without trouble. Considering
+But R2IR can also compress and decompress to different aspect ratios and resolutions, also without trouble. Considering
 this, the latent is quite hard to interpret and does not contain anything remotely similar to how digits actually look
 like.
 
@@ -88,7 +88,7 @@ R2ID is the actual image diffuser, and it works on the resolution invariant late
 - Decoder blocks: Cloud point + cross-attn to cond (reuses enc output for efficiency).
 - Project back to epsilon noise via 1x1 conv.
 
-See `modules/r2id.py` for full implementation (RIAE and RIID classes).
+See `modules/r2id.py` for full implementation (R2IR and RIID classes).
 
 ## Results
 
