@@ -3,11 +3,14 @@ from torch import nn
 
 
 class MultiHeadLinearAttention(nn.Module):
-    def __init__(self, embed_dim: int, num_heads: int = 8):
+    """Stable multi-head linear attention — works at any resolution, any Nq != Nk."""
+
+    def __init__(self, embed_dim: int, num_heads: int = 8, dropout: float = 0.0):
         super().__init__()
         assert embed_dim % num_heads == 0, f"embed_dim {embed_dim} must be divisible by num_heads {num_heads}"
         self.num_heads = num_heads
         self.head_dim = embed_dim // num_heads
+        self.dropout = nn.Dropout(dropout)
 
         self.q_proj = nn.Linear(embed_dim, embed_dim)
         self.k_proj = nn.Linear(embed_dim, embed_dim)
@@ -45,7 +48,7 @@ class MultiHeadLinearAttention(nn.Module):
 
         out = (num / den).transpose(1, 2).reshape(B, Nq, -1)  # back to (B, Nq, embed_dim)
 
-        return self.out_proj(out)
+        return self.dropout(self.out_proj(out))
 
 
 class ImageNorm(nn.Module):
@@ -229,6 +232,7 @@ class CrossAttention(nn.Module):
         self.mha = MultiHeadLinearAttention(
             embed_dim=d_channels,
             num_heads=num_heads,
+            dropout=dropout,
         )
 
     def forward(self, image, text_tokens):
@@ -261,6 +265,7 @@ class CloudAttention(nn.Module):
         self.mha = MultiHeadLinearAttention(
             embed_dim=d_channels,
             num_heads=num_heads,
+            dropout=dropout,
         )
 
     def forward(self, image, num_clouds: int = 1):
@@ -434,25 +439,65 @@ class DecBlock(nn.Module):
 # ======================================================================================================================
 
 
-class LinearTransformerBlock(nn.Module):
-    def __init__(self, embed_dim: int = 1024, num_heads: int = 8, dropout: float = 0.0):
-        super().__init__()
-        self.attn = MultiHeadLinearAttention(embed_dim, num_heads)
-        self.norm1 = nn.LayerNorm(embed_dim)
-        self.ffn = nn.Sequential(
-            nn.Linear(embed_dim, embed_dim * 4),
-            nn.SiLU(),
-            nn.Dropout(dropout),
-            nn.Linear(embed_dim * 4, embed_dim),
-        )
-        self.norm2 = nn.LayerNorm(embed_dim)
+class R2IRCrossBlock(nn.Module):
+    """Full R2IR-style block with GRN norm, linear attn, FFN, and learnable scalar residuals. Works on image shapes."""
 
-    def forward(self, query_embed: torch.Tensor, key_embed: torch.Tensor, value: torch.Tensor):
-        # Residual + attention
-        x = query_embed + self.attn(self.norm1(query_embed), key_embed, value)
-        # Residual + FFN
-        x = x + self.ffn(self.norm2(x))
-        return x
+    def __init__(self, embed_dim: int = 1024, num_heads: int = 8, mha_dropout: float = 0.0, ffn_dropout: float = 0.0):
+        super().__init__()
+        self.embed_dim = embed_dim
+
+        self.attn_ada = GRN(embed_dim)  # ← NEW: GRN for pre-attn norm
+        self.attn = MultiHeadLinearAttention(embed_dim, num_heads, dropout=mha_dropout)
+        self.attn_scalar = nn.Parameter(torch.ones(embed_dim))  # ← NEW: learnable scalar like your blocks
+
+        self.ffn_ada = GRN(embed_dim)  # ← NEW: GRN for pre-FFN norm
+        self.ffn = nn.Sequential(
+            nn.Conv2d(embed_dim, embed_dim * 4, 1),
+            nn.SiLU(),
+            nn.Dropout(ffn_dropout),
+            nn.Conv2d(embed_dim * 4, embed_dim, 1)
+        )
+        self.ffn_scalar = nn.Parameter(torch.ones(embed_dim))  # ← NEW
+
+        self.final_scalar = nn.Parameter(torch.ones(embed_dim) * 0.1)  # ← NEW: overall block gate
+
+    def forward(self, query_img: torch.Tensor, key_img: torch.Tensor, value_img: torch.Tensor):
+        # All inputs are [B, C, Hq/Wq, Wq/Hq] for query, [B, C, Hk, Wk] for key/value (Hq/Wq may != Hk/Wk)
+        B, C, Hq, Wq = query_img.shape
+        _, _, Hk, Wk = key_img.shape
+
+        working_img = query_img
+
+        # Pre-attn GRN norm
+        attn_adad = self.attn_ada(working_img)
+
+        # Flatten for attn (queries, keys, values)
+        Q_flat = attn_adad.flatten(2).transpose(1, 2)  # [B, Hq*Wq, C]
+        K_flat = key_img.flatten(2).transpose(1, 2)  # [B, Hk*Wk, C]
+        V_flat = value_img.flatten(2).transpose(1, 2)  # [B, Hk*Wk, C]
+
+        # Linear attn
+        attn_out_flat = self.attn(Q_flat, K_flat, V_flat)  # [B, Hq*Wq, C]
+
+        # Reshape back to image
+        attn_out = attn_out_flat.transpose(1, 2).view(B, C, Hq, Wq)
+
+        # Residual + scalar
+        working_img = working_img + attn_out * self.attn_scalar.view(1, C, 1, 1)
+
+        # Pre-FFN GRN norm
+        ffn_adad = self.ffn_ada(working_img)
+
+        # FFN (stays in image shape)
+        ffn_out = self.ffn(ffn_adad)
+
+        # Residual + scalar
+        working_img = working_img + ffn_out * self.ffn_scalar.view(1, C, 1, 1)
+
+        # Final residual + block scalar
+        final_img = query_img + working_img * self.final_scalar.view(1, C, 1, 1)
+
+        return final_img
 
 
 class R2IR(nn.Module):
@@ -473,7 +518,7 @@ class R2IR(nn.Module):
         self.col_channels = col_channels
         self.lat_channels = lat_channels
         self.embed_dim = embed_dim
-        self.pos_dim = 4 * (pos_high_freq + pos_low_freq)  # same calculation as RIID
+        self.pos_dim = 4 * (pos_high_freq + pos_low_freq)
         self.num_enc_blocks = int(enc_blocks)
         self.num_dec_blocks = int(dec_blocks)
         self.num_heads = int(num_heads)
@@ -503,18 +548,20 @@ class R2IR(nn.Module):
         nn.init.zeros_(self.dec_out_proj[-2].bias)
 
         self.enc_blocks = nn.ModuleList([
-            LinearTransformerBlock(
+            R2IRCrossBlock(
                 embed_dim=embed_dim,
                 num_heads=num_heads,
-                dropout=ffn_dropout,
+                mha_dropout=mha_dropout,
+                ffn_dropout=ffn_dropout,
             ) for _ in range(enc_blocks)
         ])
 
         self.dec_blocks = nn.ModuleList([
-            LinearTransformerBlock(
+            R2IRCrossBlock(
                 embed_dim=embed_dim,
                 num_heads=num_heads,
-                dropout=ffn_dropout,
+                mha_dropout=mha_dropout,
+                ffn_dropout=ffn_dropout,
             ) for _ in range(dec_blocks)
         ])
 
@@ -547,19 +594,18 @@ class R2IR(nn.Module):
             width = iw // scale
         lh, lw = height, width
 
-        # Input tokens (color + pos)
+        # Input tokens (color + pos) — keep 4D
         pos = self._get_pos(b, ih, iw)
         stacked = torch.cat([image, pos], dim=1)
-        input_tokens = self.color_to_embed_proj(stacked).permute(0, 2, 3, 1).reshape(b, -1, self.embed_dim)
+        input_tokens = self.color_to_embed_proj(stacked)  # [B, embed_dim, ih, iw]
 
         latent_pos_map = self._get_pos(b, lh, lw)
-        latent_queries = self.pos_to_embed_proj(latent_pos_map).permute(0, 2, 3, 1).reshape(b, -1, self.embed_dim)
+        latent_queries = self.pos_to_embed_proj(latent_pos_map)  # [B, embed_dim, lh, lw]
 
         for enc_block in self.enc_blocks:
             latent_queries = enc_block(latent_queries, input_tokens, input_tokens)
 
-        latent = latent_queries.reshape(b, lh, lw, self.embed_dim).permute(0, 3, 1, 2).contiguous()
-        latent = self.enc_out_proj(latent)
+        latent = self.enc_out_proj(latent_queries)  # already 4D [B, lat_channels, lh, lw]
         return latent
 
     def decode(self, latent, scale: int = 2, height: int = None, width: int = None):
@@ -569,25 +615,24 @@ class R2IR(nn.Module):
             width = lw * scale
         ih, iw = height, width
 
-        # Latent tokens (latent_color + pos)
+        # Latent tokens (latent_color + pos) — keep 4D
         latent_pos_map = self._get_pos(b, lh, lw)
         stacked = torch.cat([latent, latent_pos_map], dim=1)
-        latent_tokens = self.latent_to_embed_proj(stacked).permute(0, 2, 3, 1).reshape(b, -1, self.embed_dim)
+        latent_tokens = self.latent_to_embed_proj(stacked)  # [B, embed_dim, lh, lw]
 
         out_pos_map = self._get_pos(b, ih, iw)
-        out_queries = self.pos_to_embed_proj(out_pos_map).permute(0, 2, 3, 1).reshape(b, -1, self.embed_dim)
+        out_queries = self.pos_to_embed_proj(out_pos_map)  # [B, embed_dim, ih, iw]
 
         for dec_block in self.dec_blocks:
             out_queries = dec_block(out_queries, latent_tokens, latent_tokens)
 
-        out = out_queries.reshape(b, ih, iw, self.embed_dim).permute(0, 3, 1, 2).contiguous()
-        out = self.dec_out_proj(out)
+        out = self.dec_out_proj(out_queries)  # already 4D [B, col_channels, ih, iw]
         return out
 
 
 # ======================================================================================================================
 
-class RIID(nn.Module):
+class R2ID(nn.Module):
     def __init__(
             self,
             c_channels: int,  # color channels
