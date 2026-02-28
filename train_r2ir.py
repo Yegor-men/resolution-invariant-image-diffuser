@@ -14,7 +14,7 @@ def one_hot_encode(label):
     return torch.nn.functional.one_hot(torch.tensor(label), num_classes=10).float()
 
 
-image_size = 64
+image_size = 32
 
 
 class OneHotMNIST(torch.utils.data.Dataset):
@@ -29,7 +29,7 @@ class OneHotMNIST(torch.utils.data.Dataset):
                     interpolation=transforms.InterpolationMode.BICUBIC,
                     antialias=True
                 ),
-                transforms.Grayscale(num_output_channels=3),
+                # transforms.Grayscale(num_output_channels=3),
                 transforms.ToTensor(),  # Converts to [C, H, W] in [0.0, 1.0]
             ])
         )
@@ -46,8 +46,7 @@ class OneHotMNIST(torch.utils.data.Dataset):
 train_dataset = OneHotMNIST(train=True)
 test_dataset = OneHotMNIST(train=False)
 num_epochs = 40
-batch_size = 20
-minibatch_size = 1
+batch_size = 100
 ema_decay = 0.999
 train_dloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 test_dloader = DataLoader(test_dataset, batch_size=batch_size, shuffle=True)
@@ -59,18 +58,18 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"Cuda is available: {torch.cuda.is_available()}")
 
 model = R2IR(
-    col_channels=3,
-    lat_channels=768,
-    embed_dim=1024,
-    pos_high_freq=16,
-    pos_low_freq=16,
-    enc_blocks=1,
-    dec_blocks=1,
-    num_heads=16,
+    col_channels=1,
+    lat_channels=64,
+    embed_dim=128 + 64,
+    pos_high_freq=10,
+    pos_low_freq=6,
+    enc_blocks=4,
+    dec_blocks=4,
+    num_heads=6,
     mha_dropout=0.1,
     ffn_dropout=0.2,
 ).to(device)
-r2ir_scale = 16
+r2ir_scale = 8
 lat_size = image_size // r2ir_scale
 lat_values = model.lat_channels * lat_size ** 2
 lat_ratio = lat_values / (model.col_channels * image_size ** 2)
@@ -122,10 +121,10 @@ def make_cosine_with_warmup(optimizer, warmup_steps, total_steps, lr_end):
     return LambdaLR(optimizer, lr_lambda, -1)
 
 
-peak_lr = 1e-4
-final_lr = 1e-6
-total_steps = num_epochs * len(train_dloader) // minibatch_size
-warmup_steps = len(train_dloader) // minibatch_size
+peak_lr = 1e-3
+final_lr = 1e-5
+total_steps = num_epochs * len(train_dloader)
+warmup_steps = len(train_dloader)
 
 optimizer = torch.optim.AdamW(model.parameters(), lr=peak_lr)
 scheduler = make_cosine_with_warmup(optimizer, warmup_steps, total_steps, final_lr)
@@ -145,9 +144,6 @@ train_loss_sums = []
 test_loss_sums = []
 train_losses = []
 
-foo = 0
-bar = 0.0
-
 for E in range(num_epochs):
     model.train()
     model.zero_grad()
@@ -158,22 +154,18 @@ for E in range(num_epochs):
         lat_img = model.encode(image, scale=r2ir_scale)
         recon_img = model.decode(lat_img, scale=r2ir_scale)
 
-        loss = torch.nn.functional.mse_loss(recon_img, image) / minibatch_size
+        loss = torch.nn.functional.mse_loss(recon_img, image)
         loss.backward()
-        foo += 1
-        bar += loss.item()
 
-        if foo % minibatch_size == 0:
-            train_losses.append(bar)
-            train_loss_sum += bar
-            bar = 0.0
+        train_losses.append(loss.item())
+        train_loss_sum += loss.item()
 
-            optimizer.step()
-            scheduler.step()
-            update_ema_model(model, ema_model, ema_decay)
-            model.zero_grad()
+        optimizer.step()
+        scheduler.step()
+        update_ema_model(model, ema_model, ema_decay)
+        model.zero_grad()
 
-    train_loss_sum /= (len(train_dloader) / minibatch_size)
+    train_loss_sum /= len(train_dloader)
     train_loss_sums.append(train_loss_sum)
 
     plt.title("Loss")

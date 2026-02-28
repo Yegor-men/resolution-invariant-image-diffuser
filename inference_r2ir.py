@@ -17,7 +17,7 @@ def one_hot_encode(label):
     return torch.nn.functional.one_hot(torch.tensor(label), num_classes=10).float()
 
 
-image_size = 64
+image_size = 32
 
 
 class OneHotMNIST(torch.utils.data.Dataset):
@@ -32,7 +32,7 @@ class OneHotMNIST(torch.utils.data.Dataset):
                     interpolation=transforms.InterpolationMode.BICUBIC,
                     antialias=True
                 ),
-                transforms.Grayscale(num_output_channels=3),
+                # transforms.Grayscale(num_output_channels=3),
                 transforms.ToTensor(),  # Converts to [C, H, W] in [0.0, 1.0]
             ])
         )
@@ -47,7 +47,7 @@ class OneHotMNIST(torch.utils.data.Dataset):
 
 
 test_dataset = OneHotMNIST(train=False)
-batch_size = 20
+batch_size = 100
 test_dloader = DataLoader(test_dataset, batch_size=batch_size, shuffle=True)
 
 from modules.r2id import R2IR
@@ -57,14 +57,14 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"Cuda is available: {torch.cuda.is_available()}")
 
 model = R2IR(
-    col_channels=3,
-    lat_channels=768,
-    embed_dim=1024,
-    pos_high_freq=16,
-    pos_low_freq=16,
-    enc_blocks=1,
-    dec_blocks=1,
-    num_heads=16,
+    col_channels=1,
+    lat_channels=64,
+    embed_dim=128 + 64,
+    pos_high_freq=10,
+    pos_low_freq=6,
+    enc_blocks=4,
+    dec_blocks=4,
+    num_heads=6,
     mha_dropout=0.1,
     ffn_dropout=0.2,
 ).to(device)
@@ -73,7 +73,7 @@ model.print_model_summary()
 
 from save_load_model import load_checkpoint_into
 
-model = load_checkpoint_into(model, "models/E40_0.01115_autoencoder_20260228_185931.pt", "cuda")
+model = load_checkpoint_into(model, "models/E40_0.01246_autoencoder_20260228_220048.pt", "cuda")
 
 
 def invert_image(image):
@@ -92,7 +92,7 @@ for i, (image, label) in tqdm(enumerate(test_dloader), total=len(test_dloader), 
     with torch.no_grad():
         image = invert_image(image).to(device)
         lat_img = model.encode(image, height=8, width=8)
-        recon_img = model.decode(lat_img, height=64, width=64)
+        recon_img = model.decode(lat_img, height=32, width=32)
         loss = torch.nn.functional.mse_loss(recon_img, image)
         test_loss_sum += loss.item()
         if i == 0:
