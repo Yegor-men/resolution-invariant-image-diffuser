@@ -14,7 +14,7 @@ def one_hot_encode(label):
     return torch.nn.functional.one_hot(torch.tensor(label), num_classes=10).float()
 
 
-image_size = 32
+image_size = 64
 
 
 class OneHotMNIST(torch.utils.data.Dataset):
@@ -46,7 +46,7 @@ class OneHotMNIST(torch.utils.data.Dataset):
 train_dataset = OneHotMNIST(train=True)
 test_dataset = OneHotMNIST(train=False)
 num_epochs = 40
-batch_size = 100
+batch_size = 20
 minibatch_size = 1
 ema_decay = 0.999
 train_dloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
@@ -64,9 +64,17 @@ model = R2IR(
     embed_dim=1024,
     pos_high_freq=16,
     pos_low_freq=16,
+    enc_blocks=1,
+    dec_blocks=1,
     num_heads=16,
+    mha_dropout=0.1,
+    ffn_dropout=0.2,
 ).to(device)
-r2ir_scale = 4
+r2ir_scale = 16
+lat_size = image_size // r2ir_scale
+lat_values = model.lat_channels * lat_size ** 2
+lat_ratio = lat_values / (model.col_channels * image_size ** 2)
+print(f"Latent size: {lat_size:,} | Total values: {lat_values:,} | Image to Latent ratio 1:{lat_ratio:.3}")
 
 model.print_model_summary()
 

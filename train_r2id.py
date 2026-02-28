@@ -29,6 +29,7 @@ class OneHotMNIST(torch.utils.data.Dataset):
                     interpolation=transforms.InterpolationMode.BICUBIC,
                     antialias=True
                 ),
+                transforms.Grayscale(num_output_channels=3),
                 transforms.ToTensor(),  # Converts to [C, H, W] in [0.0, 1.0]
             ])
         )
@@ -49,29 +50,31 @@ test_dataset = OneHotMNIST(train=False)
 device = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"Cuda is available: {torch.cuda.is_available()}")
 
-from modules.r2id import RIAE, RIID
+from modules.r2id import R2IR, R2ID
 from modules.dummy_textencoder import DummyTextCond
 
-riae = RIAE(
-    col_channels=1,
-    lat_channels=64,
-    embed_dim=256,
-    reduction=4,
-    pos_high_freq=8,
-    pos_low_freq=3,
-    num_heads=8,
-    dropout=0.1,
+r2ir = R2IR(
+    col_channels=3,
+    lat_channels=768,
+    embed_dim=1024,
+    pos_high_freq=16,
+    pos_low_freq=16,
+    enc_blocks=1,
+    dec_blocks=1,
+    num_heads=16,
+    mha_dropout=0.1,
+    ffn_dropout=0.2,
 ).to(device)
-riae.print_model_summary()
+r2ir.print_model_summary()
 
-r2id = RIID(
-    c_channels=riae.lat_channels,
-    d_channels=256,
+r2id = R2ID(
+    c_channels=r2ir.lat_channels,
+    d_channels=1024,
     enc_blocks=8,
     dec_blocks=8,
-    num_heads=8,
-    pos_high_freq=8,
-    pos_low_freq=3,
+    num_heads=16,
+    pos_high_freq=16,
+    pos_low_freq=16,
     time_high_freq=7,
     time_low_freq=3,
     film_dim=128,
@@ -79,6 +82,7 @@ r2id = RIID(
     cross_dropout=0.1,
     ffn_dropout=0.2,
 ).to(device)
+r2ir_scale = 8
 r2id.print_model_summary()
 train_num_clouds = 1
 
@@ -89,11 +93,11 @@ text_encoder = DummyTextCond(
 
 from save_load_model import load_checkpoint_into
 
-riae = load_checkpoint_into(riae, "models/_E20_0.07765_autoencoder_20260226_071710.pt", "cuda")
+r2ir = load_checkpoint_into(r2ir, "models/E40_0.01115_autoencoder_20260228_185931.pt", "cuda")
 # text_encoder = load_checkpoint_into(text_encoder, "models/E20_0.04429_text_embedding_20260224_161135.pt")
 # r2id = load_checkpoint_into(r2id, "models/E20_0.04429_diffusion_20260224_161134.pt", "cuda")
 
-riae.eval()
+r2ir.eval()
 
 import copy
 
@@ -138,9 +142,9 @@ def make_cosine_with_warmup(optimizer, warmup_steps, total_steps, lr_end):
     return LambdaLR(optimizer, lr_lambda, -1)
 
 
-num_epochs = 40
+num_epochs = 20
 batch_size = 100
-ema_decay = 0.9995
+ema_decay = 0.999
 
 train_dloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 test_dloader = DataLoader(test_dataset, batch_size=batch_size, shuffle=True)
@@ -281,7 +285,7 @@ for E in range(num_epochs):
             # )
 
             image, label = invert_image(image).to(device), label.to(device)
-            image = riae.encode(image, fraction=1 / 16)
+            image = r2ir.encode(image, r2ir_scale)
 
             t = torch.rand(b)
             t, _ = torch.sort(t)
@@ -315,7 +319,7 @@ for E in range(num_epochs):
                 continue
 
             image, label = invert_image(image).to(device), label.to(device)
-            image = riae.encode(image, fraction=1 / 16)
+            image = r2ir.encode(image, r2ir_scale)
 
             t = torch.rand(b)
             t, _ = torch.sort(t)
@@ -351,7 +355,7 @@ for E in range(num_epochs):
             image, label = next(iter(train_dloader))
             b, c, h, w = image.shape
             image, label = invert_image(image).to(device), label.to(device)
-            image = riae.encode(image, fraction=1 / 16)
+            image = r2ir.encode(image, r2ir_scale)
 
             alpha_bar = alpha_bar_cosine(torch.ones(b) * t).to(device)
             noisy_image, eps = corrupt_image(image, alpha_bar)
@@ -405,8 +409,8 @@ for E in range(num_epochs):
         sizes = [
             (16, 16, 1, "Half"),
             (32, 32, 1, "1:1@1"),
-            (32, 32, 2, "1:1@2"),
-            (32, 32, 4, "1:1@4"),
+            # (32, 32, 2, "1:1@2"),
+            # (32, 32, 4, "1:1@4"),
             # (24, 40, "foo"),
             # (40, 24, "bar"),
             # (18, 27, "3:2"),
@@ -422,8 +426,10 @@ for E in range(num_epochs):
         ]
 
         for (height, width, num_clouds, name) in sizes:
-            height, width = height // riae.reduction, width // riae.reduction
-            grid_noise = torch.randn(10, riae.lat_channels, height, width).to(device)
+            height, width = height // r2ir_scale, width // r2ir_scale
+            # height, width = height, width
+            grid_noise = torch.randn(10, r2ir.lat_channels, height, width).to(device)
+            # grid_noise = torch.randn(10, 1, height, width).to(device)
 
             final_x0_hat, final_x = run_ddim_visualization(
                 model=r2id,
@@ -438,7 +444,8 @@ for E in range(num_epochs):
                 device=torch.device("cuda"),
             )
 
-            diffused_image = uninvert_image(riae.decode(final_x))
+            diffused_image = uninvert_image(r2ir.decode(final_x, r2ir_scale))
+            # diffused_image = uninvert_image(final_x)
             render_image(diffused_image, f"{name} - H:{height}, W:{width}")
 
     del final_x0_hat, final_x, grid_noise, pos_text_cond, null_text_cond

@@ -10,6 +10,28 @@ pixel density, through dual positional embeddings and Gaussian coordinate jitter
 
 This is a proof-of-concept implementation, trained on unaugmented 32x32 MNIST digits on consumer hardware.
 
+## Results
+
+Resulting images can be found in `media/` for various aspect ratios and resolutions. Keep in mind, that with the way
+that R2ID and R2IR work, all these images were diffused just once in the latent space, and then R2IR simply sampled back
+into pixel space. The latent space is _not_ fixed size, but dynamic. A smaller latent size would have resulted in worse
+quality, while a larger latent would result in a better one. The model was trained only on 1:1 aspect ratio.
+
+10px
+![10px.png](media/10px.png)
+
+16px
+![16px.png](media/16px.png)
+
+28px
+![28px.png](media/28px.png)
+
+32px
+![32px.png](media/32px.png)
+
+2:3 aspect ratio
+![2_3.png](media/2_3.png)
+
 ## Architecture Overview
 
 R2IR-R2ID are a pair of models, used in tandem for diffusion. R2IR is used first, but the narrative makes more sense if
@@ -69,7 +91,7 @@ can also use it in R2ID too.
 R2IR effectively changes the image's structure from raw pixel values, into a per-pixel approximation of what it thinks
 the entire image is meant to be, based on the pixel's coordinate. Going back to the 256 positioning channels example,
 we could hence dedicate 768 channels to the color to have at most 1024 channels, and yet the model's parameter count is
-incredibly efficient at about 10 million or so. With 768 color channels, assuming a 3 channel RGB image as input, we've
+incredibly efficient at 27,576,067. With 768 color channels, assuming a 3 channel RGB image as input, we've
 effectively given each latent pixel 256 times as many channels, which means that we can reduce the height and width by
 16x and the latent will still store the same amount of values as the raw image. The R2IR latent is hence unlike
 autoencoder latents, and visualizations of it don't really make much sense. The latent is also a lot more robust to size
@@ -80,20 +102,6 @@ All in all, R2IR and R2ID approach the task of diffusion as a collection of dist
 color and relative coordinate. Then, based on the other pixels that we know about, we can predict the epsilon noise.
 
 See `modules/r2id.py` for the full implementation of R2IR and R2ID.
-
-## Results
-
-Resulting images can be found in `media/`. Keep in mind, that this is super early in training, literally a couple hours
-total. Here are some examples:
-
-16px
-![16px](media/16px.png)
-
-28px
-![28px](media/28px.png)
-
-32px native
-![32px](media/32px.png)
 
 ## Installation
 
