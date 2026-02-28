@@ -5,7 +5,7 @@ from torch import nn
 class MultiHeadLinearAttention(nn.Module):
     """Stable multi-head linear attention — works at any resolution, any Nq != Nk."""
 
-    def __init__(self, embed_dim: int, num_heads: int = 8, dropout: float = 0.0):
+    def __init__(self, embed_dim: int, num_heads: int, dropout: float = 0.0):
         super().__init__()
         assert embed_dim % num_heads == 0, f"embed_dim {embed_dim} must be divisible by num_heads {num_heads}"
         self.num_heads = num_heads
@@ -339,45 +339,6 @@ class EncBlock(nn.Module):
         return final_image
 
 
-class EncBlockLight(nn.Module):
-    def __init__(
-            self,
-            d_channels: int,
-            num_heads: int,
-            cloud_dropout: float = 0.0,
-            ffn_dropout: float = 0.0,
-    ):
-        super().__init__()
-        self.d_channels = d_channels
-
-        self.cloud_attn = CloudAttention(
-            d_channels=d_channels,
-            num_heads=num_heads,
-            dropout=cloud_dropout,
-        )
-        self.cloud_scalar = nn.Parameter(torch.ones(d_channels))
-
-        self.ffn = ImageFFN(d_channels, ffn_dropout)
-        self.ffn_scalar = nn.Parameter(torch.ones(d_channels))
-
-        self.final_scalar = nn.Parameter(torch.ones(d_channels) * 0.1)
-
-    def forward(self, image, num_clouds: int = 1):
-        working_image = image
-
-        cloud_out = self.cloud_attn(working_image, num_clouds)
-
-        working_image = working_image + cloud_out * self.cloud_scalar.view(1, self.d_channels, 1, 1)
-
-        ffn_out = self.ffn(working_image)
-
-        working_image = working_image + ffn_out * self.ffn_scalar.view(1, self.d_channels, 1, 1)
-
-        final_image = image + working_image * self.final_scalar.view(1, self.d_channels, 1, 1)
-
-        return final_image
-
-
 class DecBlock(nn.Module):
     def __init__(
             self,
@@ -440,26 +401,24 @@ class DecBlock(nn.Module):
 
 
 class R2IRCrossBlock(nn.Module):
-    """Full R2IR-style block with GRN norm, linear attn, FFN, and learnable scalar residuals. Works on image shapes."""
-
-    def __init__(self, embed_dim: int = 1024, num_heads: int = 8, mha_dropout: float = 0.0, ffn_dropout: float = 0.0):
+    def __init__(self, embed_dim: int, num_heads: int, mha_dropout: float = 0.0, ffn_dropout: float = 0.0):
         super().__init__()
         self.embed_dim = embed_dim
 
-        self.attn_ada = GRN(embed_dim)  # ← NEW: GRN for pre-attn norm
+        self.attn_ada = GRN(embed_dim)
         self.attn = MultiHeadLinearAttention(embed_dim, num_heads, dropout=mha_dropout)
-        self.attn_scalar = nn.Parameter(torch.ones(embed_dim))  # ← NEW: learnable scalar like your blocks
+        self.attn_scalar = nn.Parameter(torch.ones(embed_dim))
 
-        self.ffn_ada = GRN(embed_dim)  # ← NEW: GRN for pre-FFN norm
+        self.ffn_norm = GRN(embed_dim)
         self.ffn = nn.Sequential(
             nn.Conv2d(embed_dim, embed_dim * 4, 1),
             nn.SiLU(),
             nn.Dropout(ffn_dropout),
             nn.Conv2d(embed_dim * 4, embed_dim, 1)
         )
-        self.ffn_scalar = nn.Parameter(torch.ones(embed_dim))  # ← NEW
+        self.ffn_scalar = nn.Parameter(torch.ones(embed_dim))
 
-        self.final_scalar = nn.Parameter(torch.ones(embed_dim) * 0.1)  # ← NEW: overall block gate
+        self.final_scalar = nn.Parameter(torch.ones(embed_dim) * 0.1)
 
     def forward(self, query_img: torch.Tensor, key_img: torch.Tensor, value_img: torch.Tensor):
         # All inputs are [B, C, Hq/Wq, Wq/Hq] for query, [B, C, Hk, Wk] for key/value (Hq/Wq may != Hk/Wk)
@@ -486,10 +445,10 @@ class R2IRCrossBlock(nn.Module):
         working_img = working_img + attn_out * self.attn_scalar.view(1, C, 1, 1)
 
         # Pre-FFN GRN norm
-        ffn_adad = self.ffn_ada(working_img)
+        ffn_normed = self.ffn_norm(working_img)
 
         # FFN (stays in image shape)
-        ffn_out = self.ffn(ffn_adad)
+        ffn_out = self.ffn(ffn_normed)
 
         # Residual + scalar
         working_img = working_img + ffn_out * self.ffn_scalar.view(1, C, 1, 1)
@@ -536,8 +495,8 @@ class R2IR(nn.Module):
 
         # output head for encoding (to lat_channels colors)
         self.enc_out_proj = nn.Conv2d(embed_dim, lat_channels, 1)
-        # nn.init.zeros_(self.enc_out_proj.weight)
-        # nn.init.zeros_(self.enc_out_proj.bias)
+        nn.init.zeros_(self.enc_out_proj.weight)
+        nn.init.zeros_(self.enc_out_proj.bias)
 
         # Output head for decoding (to col_channels colors)
         self.dec_out_proj = nn.Sequential(
