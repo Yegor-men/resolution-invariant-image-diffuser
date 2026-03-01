@@ -29,7 +29,7 @@ class OneHotMNIST(torch.utils.data.Dataset):
                     interpolation=transforms.InterpolationMode.BICUBIC,
                     antialias=True
                 ),
-                transforms.Grayscale(num_output_channels=3),
+                # transforms.Grayscale(num_output_channels=3),
                 transforms.ToTensor(),  # Converts to [C, H, W] in [0.0, 1.0]
             ])
         )
@@ -50,18 +50,18 @@ test_dataset = OneHotMNIST(train=False)
 device = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"Cuda is available: {torch.cuda.is_available()}")
 
-from modules.r2id import R2IR, R2ID
+from modules.r2ir_r2id import R2IR, R2ID
 from modules.dummy_textencoder import DummyTextCond
 
 r2ir = R2IR(
-    col_channels=3,
-    lat_channels=768,
-    embed_dim=1024,
-    pos_high_freq=16,
-    pos_low_freq=16,
-    enc_blocks=1,
-    dec_blocks=1,
-    num_heads=16,
+    col_channels=1,
+    lat_channels=64,
+    embed_dim=128 + 64,
+    pos_high_freq=10,
+    pos_low_freq=6,
+    enc_blocks=4,
+    dec_blocks=4,
+    num_heads=6,
     mha_dropout=0.1,
     ffn_dropout=0.2,
 ).to(device)
@@ -69,12 +69,12 @@ r2ir.print_model_summary()
 
 r2id = R2ID(
     c_channels=r2ir.lat_channels,
-    d_channels=1024,
+    d_channels=128 + r2ir.lat_channels,
     enc_blocks=8,
     dec_blocks=8,
-    num_heads=16,
-    pos_high_freq=16,
-    pos_low_freq=16,
+    num_heads=6,
+    pos_high_freq=10,
+    pos_low_freq=6,
     time_high_freq=7,
     time_low_freq=3,
     film_dim=128,
@@ -82,9 +82,8 @@ r2id = R2ID(
     cross_dropout=0.1,
     ffn_dropout=0.2,
 ).to(device)
-r2ir_scale = 8
+lat_w, lat_h = 4, 4
 r2id.print_model_summary()
-train_num_clouds = 1
 
 text_encoder = DummyTextCond(
     token_sequence_length=2,
@@ -93,7 +92,7 @@ text_encoder = DummyTextCond(
 
 from save_load_model import load_checkpoint_into
 
-r2ir = load_checkpoint_into(r2ir, "models/E40_0.01115_autoencoder_20260228_185931.pt", "cuda")
+r2ir = load_checkpoint_into(r2ir, "models/_E40_0.01037_autoencoder_20260301_194643.pt", "cuda")
 # text_encoder = load_checkpoint_into(text_encoder, "models/E20_0.04429_text_embedding_20260224_161135.pt")
 # r2id = load_checkpoint_into(r2id, "models/E20_0.04429_diffusion_20260224_161134.pt", "cuda")
 
@@ -142,15 +141,15 @@ def make_cosine_with_warmup(optimizer, warmup_steps, total_steps, lr_end):
     return LambdaLR(optimizer, lr_lambda, -1)
 
 
-num_epochs = 20
+num_epochs = 40
 batch_size = 100
 ema_decay = 0.999
 
 train_dloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 test_dloader = DataLoader(test_dataset, batch_size=batch_size, shuffle=True)
 
-peak_lr = 1e-4
-final_lr = 1e-6
+peak_lr = 1e-3
+final_lr = 1e-5
 total_steps = num_epochs * len(train_dloader)
 warmup_steps = len(train_dloader)
 
@@ -161,86 +160,6 @@ scheduler = make_cosine_with_warmup(optimizer, warmup_steps, total_steps, final_
 import random
 import math
 from typing import Tuple
-
-
-def _lcm(a: int, b: int) -> int:
-    return abs(a * b) // math.gcd(a, b)
-
-
-def _clamped_multiple(value: int, multiple: int, min_v: int, max_v: int) -> int:
-    """Round value to nearest multiple and clamp into [min_v, max_v]."""
-    k = max(1, round(value / multiple))
-    out = k * multiple
-    out = max(min_v, min(out, max_v))
-    return out
-
-
-def random_batch_rescale(
-        batch: torch.Tensor,
-        min_size: int = 48,
-        max_size: int = 80,
-        step_multiple: int = 8,
-        ensure_divisible_by: int = 8,
-        keep_square: bool = True,
-        per_sample: bool = False,
-        device: torch.device | None = None,
-) -> Tuple[torch.Tensor, Tuple[int, int]]:
-    """
-    Rescale a batch of images (B,C,H,W) using bicubic interpolation to a random size.
-
-    - If per_sample=False (default) the whole batch will be resized to a single random size (recommended).
-    - Ensures the resulting height/width are multiples of `step_multiple` AND divisible by `ensure_divisible_by`.
-      Internally computes a step = lcm(step_multiple, ensure_divisible_by).
-    - Returns (resized_batch, (new_h, new_w)). If per_sample=True returns resized batch and (None, None).
-
-    NOTE: PixelUnshuffle requires H,W to be divisible by your reduction/rescale factor (e.g. 8).
-    """
-    assert batch.ndim == 4, "batch must be [B,C,H,W]"
-    device = device or batch.device
-    B, C, H, W = batch.shape
-    # ensure step is compatible with required divisibility
-    step = _lcm(step_multiple, ensure_divisible_by)
-
-    # clamp min/max to sensible multiples
-    min_size = max(min_size, step)
-    max_size = max(max_size, min_size)
-    # compute available multipliers
-    min_k = (min_size + step - 1) // step
-    max_k = max_size // step
-    if max_k < min_k:
-        raise ValueError("Invalid min/max vs step/divisibility — adjust parameters.")
-
-    if per_sample:
-        out_images = []
-        for i in range(B):
-            k = random.randint(min_k, max_k)
-            tgt = k * step
-            if keep_square:
-                new_h = new_w = tgt
-            else:
-                k_h = random.randint(min_k, max_k)
-                k_w = random.randint(min_k, max_k)
-                new_h, new_w = k_h * step, k_w * step
-            img = batch[i: i + 1]  # [1,C,H,W]
-            resized = torch.nn.functional.interpolate(img.to(device), size=(new_h, new_w), mode='bicubic',
-                                                      align_corners=False)
-            out_images.append(resized)
-        return torch.cat(out_images, dim=0), (None, None)
-    else:
-        k = random.randint(min_k, max_k)
-        tgt = k * step
-        if keep_square:
-            new_h = new_w = tgt
-        else:
-            # pick separate multiples for height/width
-            k_h = random.randint(min_k, max_k)
-            k_w = random.randint(min_k, max_k)
-            new_h, new_w = k_h * step, k_w * step
-
-        resized = torch.nn.functional.interpolate(batch.to(device), size=(new_h, new_w), mode='bicubic',
-                                                  align_corners=False)
-        return resized, (new_h, new_w)
-
 
 from tqdm import tqdm
 from modules.alpha_bar import alpha_bar_cosine
@@ -273,19 +192,8 @@ for E in range(num_epochs):
             continue
 
         with torch.no_grad():
-            # rescaled_image, (h_new, w_new) = random_batch_rescale(
-            #     image,
-            #     min_size=6 * 8,
-            #     max_size=10 * 8,
-            #     step_multiple=8,
-            #     ensure_divisible_by=8,
-            #     keep_square=True,
-            #     per_sample=False,
-            #     device=image.device
-            # )
-
             image, label = invert_image(image).to(device), label.to(device)
-            image = r2ir.encode(image, r2ir_scale)
+            image = r2ir.encode(image, width=lat_w, height=lat_h)
 
             t = torch.rand(b)
             t, _ = torch.sort(t)
@@ -319,7 +227,7 @@ for E in range(num_epochs):
                 continue
 
             image, label = invert_image(image).to(device), label.to(device)
-            image = r2ir.encode(image, r2ir_scale)
+            image = r2ir.encode(image, width=lat_w, height=lat_h)
 
             t = torch.rand(b)
             t, _ = torch.sort(t)
@@ -355,7 +263,7 @@ for E in range(num_epochs):
             image, label = next(iter(train_dloader))
             b, c, h, w = image.shape
             image, label = invert_image(image).to(device), label.to(device)
-            image = r2ir.encode(image, r2ir_scale)
+            image = r2ir.encode(image, width=lat_w, height=lat_h)
 
             alpha_bar = alpha_bar_cosine(torch.ones(b) * t).to(device)
             noisy_image, eps = corrupt_image(image, alpha_bar)
@@ -364,7 +272,7 @@ for E in range(num_epochs):
             null_cond = text_encoder(torch.zeros_like(label)).to(device)
             cond_list = [pos_cond, null_cond]
 
-            predicted_eps_list = r2id(noisy_image, alpha_bar, cond_list, train_num_clouds)
+            predicted_eps_list = r2id(noisy_image, alpha_bar, cond_list)
             eps_pos, eps_null = predicted_eps_list[0], predicted_eps_list[1]
 
             null_loss = nn.functional.mse_loss(eps_null, eps)
@@ -397,18 +305,19 @@ for E in range(num_epochs):
 
     # RENDERING
     with torch.no_grad():
-        # positive_label = torch.zeros(100, 10).to(device)
-        # for i in range(10):
-        #     positive_label[i * 10:(i + 1) * 10, i] = 1.0
+        positive_label = torch.zeros(100, 10).to(device)
+        for i in range(10):
+            positive_label[i * 10:(i + 1) * 10, i] = 1.0
 
-        positive_label = torch.eye(10).to(device)
+        # positive_label = torch.eye(10).to(device)
 
         pos_text_cond = text_encoder(positive_label)
         null_text_cond = text_encoder(torch.zeros_like(positive_label))
 
         sizes = [
-            (16, 16, 1, "Half"),
-            (32, 32, 1, "1:1@1"),
+            (16, 16, "16px"),
+            (32, 32, "32px"),
+            (48, 48, "48px"),
             # (32, 32, 2, "1:1@2"),
             # (32, 32, 4, "1:1@4"),
             # (24, 40, "foo"),
@@ -425,28 +334,26 @@ for E in range(num_epochs):
             # (64, 64, 4, "Double@4"),
         ]
 
-        for (height, width, num_clouds, name) in sizes:
-            height, width = height // r2ir_scale, width // r2ir_scale
-            # height, width = height, width
-            grid_noise = torch.randn(10, r2ir.lat_channels, height, width).to(device)
-            # grid_noise = torch.randn(10, 1, height, width).to(device)
-
+        for lat_size in (4, 6, 8):
+            lat_h, lat_w = lat_size, lat_size
+            grid_noise = torch.randn(100, r2ir.lat_channels, lat_h, lat_w).to(device)
             final_x0_hat, final_x = run_ddim_visualization(
-                model=r2id,
-                num_clouds=num_clouds,
+                model=ema_r2id,
                 initial_noise=grid_noise,
                 pos_text_cond=pos_text_cond,
                 null_text_cond=null_text_cond,
                 alpha_bar_fn=alpha_bar_cosine,
                 num_steps=100,
-                cfg_scale=4.0,  # change to 1.0 for sdxl
-                eta=2.0,  # change to 1.0 for sdxl
+                cfg_scale=1.0,
+                eta=1.0,
                 device=torch.device("cuda"),
             )
 
-            diffused_image = uninvert_image(r2ir.decode(final_x, r2ir_scale))
-            # diffused_image = uninvert_image(final_x)
-            render_image(diffused_image, f"{name} - H:{height}, W:{width}")
+            for (height, width, name) in sizes:
+                diffused_image = uninvert_image(r2ir.decode(final_x, height=height, width=width))
+                render_image(diffused_image, f"{name} - Latent H:{lat_h}, W:{lat_w} - Image H:{height}, W:{width}",
+                             name,
+                             False)
 
     del final_x0_hat, final_x, grid_noise, pos_text_cond, null_text_cond
     torch.cuda.empty_cache()

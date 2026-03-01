@@ -6,7 +6,6 @@ from tqdm import tqdm
 @torch.no_grad()
 def run_ddim_visualization(
         model: torch.nn.Module,
-        num_clouds: int,
         initial_noise: torch.Tensor,
         null_text_cond: torch.Tensor,
         pos_text_cond: torch.Tensor,
@@ -42,7 +41,7 @@ def run_ddim_visualization(
 
         # model outputs (classifier-free guidance: uncond + cond)
         cond_list = [null_text_cond, pos_text_cond]
-        eps_list = model(x, a_t, cond_list, num_clouds)
+        eps_list = model(x, a_t, cond_list)
         eps_null, eps_pos = eps_list[0], eps_list[1]
 
         eps_hat = eps_null + cfg_scale * (eps_pos - eps_null)
