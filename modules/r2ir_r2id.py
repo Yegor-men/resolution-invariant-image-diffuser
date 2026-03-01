@@ -494,9 +494,12 @@ class R2IR(nn.Module):
         self.latent_to_embed_proj = nn.Conv2d(lat_channels + self.pos_dim * 2, embed_dim, 1)
 
         # output head for encoding (to lat_channels colors)
-        self.enc_out_proj = nn.Conv2d(embed_dim, lat_channels, 1)
-        nn.init.zeros_(self.enc_out_proj.weight)
-        nn.init.zeros_(self.enc_out_proj.bias)
+        self.enc_out_proj = nn.Sequential(
+            nn.Conv2d(embed_dim, lat_channels, 1),
+            nn.Tanh()
+        )
+        nn.init.zeros_(self.enc_out_proj[-2].weight)
+        nn.init.zeros_(self.enc_out_proj[-2].bias)
 
         # Output head for decoding (to col_channels colors)
         self.dec_out_proj = nn.Sequential(
@@ -524,7 +527,7 @@ class R2IR(nn.Module):
             ) for _ in range(dec_blocks)
         ])
 
-    def print_model_summary(self):
+    def print_model_summary(self, detailed: bool = False):
         def count_params(module):
             return sum(p.numel() for p in module.parameters() if p.requires_grad)
 
@@ -532,14 +535,15 @@ class R2IR(nn.Module):
         print(f"\tembed_dim: {self.embed_dim} | pos_dim: {self.pos_dim * 2}")
         print(f"\tcol/lat channels: {self.col_channels}/{self.lat_channels}")
         print(f"Total Trainable Parameters: {sum(p.numel() for p in self.parameters() if p.requires_grad):,}")
-        print(f"\tPosition Embedding: {count_params(self.pos_embed):,}")
-        print(f"\tColor→Embed Proj: {count_params(self.color_to_embed_proj):,}")
-        print(f"\tPos→Embed Proj: {count_params(self.pos_to_embed_proj):,}")
-        print(f"\tLatent→Embed Proj: {count_params(self.latent_to_embed_proj):,}")
-        print(f"\tEncoder Output Proj: {count_params(self.enc_out_proj):,}")
-        print(f"\tDecoder Output Proj: {count_params(self.dec_out_proj):,}")
-        print(f"\tEncoder Blocks: {count_params(self.enc_blocks):,}")
-        print(f"\tDecoder Blocks: {count_params(self.dec_blocks):,}")
+        if detailed:
+            print(f"\tPosition Embedding: {count_params(self.pos_embed):,}")
+            print(f"\tColor→Embed Proj: {count_params(self.color_to_embed_proj):,}")
+            print(f"\tPos→Embed Proj: {count_params(self.pos_to_embed_proj):,}")
+            print(f"\tLatent→Embed Proj: {count_params(self.latent_to_embed_proj):,}")
+            print(f"\tEncoder Output Proj: {count_params(self.enc_out_proj):,}")
+            print(f"\tDecoder Output Proj: {count_params(self.dec_out_proj):,}")
+            print(f"\tEncoder Blocks: {count_params(self.enc_blocks):,}")
+            print(f"\tDecoder Blocks: {count_params(self.dec_blocks):,}")
 
     def _get_pos(self, b: int, h: int, w: int):
         rel = self.pos_embed(b, h, w, relative=True)
