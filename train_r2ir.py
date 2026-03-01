@@ -51,7 +51,7 @@ ema_decay = 0.999
 train_dloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 test_dloader = DataLoader(test_dataset, batch_size=batch_size, shuffle=True)
 
-from modules.r2id import R2IR
+from modules.r2ir_r2id import R2IR
 from modules.render_image import render_image
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
