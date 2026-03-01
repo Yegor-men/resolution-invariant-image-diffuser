@@ -33,8 +33,8 @@ r2id = R2ID(
     time_high_freq=7,
     time_low_freq=3,
     film_dim=128,
-    cloud_dropout=0.1,
-    cross_dropout=0.1,
+    self_attn_dropout=0.1,
+    cross_attn_dropout=0.1,
     ffn_dropout=0.2,
 ).to(device)
 
